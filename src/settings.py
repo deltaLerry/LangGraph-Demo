@@ -21,6 +21,8 @@ class AppSettings:
     output_base: str = "outputs"
     # 阶段：用于归档/持久化记录（例如 stage1 / stage2 / stage3）
     stage: str = "stage1"
+    # 写作/审核时注入“最近章节记忆”的数量（只用梗概，不塞全文）
+    memory_recent_k: int = 3
 
     # 运行模式：template / llm / auto
     llm_mode: str = "auto"
@@ -52,6 +54,7 @@ def load_settings(
     idea: Optional[str] = None,
     output_base: Optional[str] = None,
     stage: Optional[str] = None,
+    memory_recent_k: Optional[int] = None,
     target_words: Optional[int] = None,
     chapters: Optional[int] = None,
     max_rewrites: Optional[int] = None,
@@ -102,6 +105,7 @@ def load_settings(
     cfg_idea = str(cfg_app.get("idea", "") or "").strip() or AppSettings.idea
     cfg_output_base = str(cfg_app.get("output_base", "") or "").strip() or AppSettings.output_base
     cfg_stage = str(cfg_app.get("stage", "") or "").strip() or AppSettings.stage
+    cfg_memory_recent_k = int(cfg_app.get("memory_recent_k", AppSettings.memory_recent_k))
     cfg_llm_mode = str(cfg_app.get("llm_mode", "") or "").strip().lower() or AppSettings.llm_mode
     cfg_debug = bool(cfg_app.get("debug", AppSettings.debug))
 
@@ -113,6 +117,7 @@ def load_settings(
     env_idea = (os.getenv("IDEA", "") or "").strip()
     env_output_base = (os.getenv("OUTPUT_BASE", "") or "").strip()
     env_stage = (os.getenv("STAGE", "") or os.getenv("APP_STAGE", "") or "").strip()
+    env_memory_recent_k = (os.getenv("MEMORY_RECENT_K", "") or "").strip()
     env_llm_mode = (os.getenv("LLM_MODE", "") or "").strip().lower()
     env_debug = (os.getenv("DEBUG", "") or os.getenv("APP_DEBUG", "") or "").strip().lower()
     env_target_words = os.getenv("TARGET_WORDS", "").strip()
@@ -130,6 +135,12 @@ def load_settings(
     final_idea = env_idea or cfg_idea
     final_output_base = env_output_base or cfg_output_base
     final_stage = env_stage or cfg_stage
+    final_memory_recent_k = cfg_memory_recent_k
+    if env_memory_recent_k:
+        try:
+            final_memory_recent_k = int(env_memory_recent_k)
+        except ValueError:
+            final_memory_recent_k = cfg_memory_recent_k
     final_llm_mode = env_llm_mode or cfg_llm_mode
     final_debug = cfg_debug
     if env_debug in ("1", "true", "yes", "on"):
@@ -147,6 +158,8 @@ def load_settings(
         final_output_base = output_base.strip()
     if stage is not None and stage.strip():
         final_stage = stage.strip()
+    if memory_recent_k is not None:
+        final_memory_recent_k = int(memory_recent_k)
     if target_words is not None:
         final_target_words = int(target_words)
     if chapters is not None:
@@ -158,6 +171,7 @@ def load_settings(
     final_target_words = max(50, final_target_words)
     final_chapters = max(1, final_chapters)
     final_max_rewrites = max(0, final_max_rewrites)
+    final_memory_recent_k = max(0, min(20, int(final_memory_recent_k)))
     if final_llm_mode not in ("template", "llm", "auto"):
         final_llm_mode = "auto"
 
@@ -194,6 +208,7 @@ def load_settings(
         idea=final_idea,
         output_base=final_output_base,
         stage=final_stage,
+        memory_recent_k=final_memory_recent_k,
         llm_mode=final_llm_mode,
         debug=final_debug,
         gen=GenerationSettings(

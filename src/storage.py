@@ -43,6 +43,16 @@ def read_json(path: str) -> Optional[Dict[str, Any]]:
     return _read_json_if_exists(path)
 
 
+def read_text_if_exists(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
 def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
     if not path or not os.path.exists(path):
         return None
@@ -201,6 +211,64 @@ def ensure_memory_dirs(project_dir: str) -> Dict[str, str]:
     os.makedirs(chapters_dir, exist_ok=True)
     os.makedirs(arcs_dir, exist_ok=True)
     return {"memory_root": mem_root, "chapters_dir": chapters_dir, "arcs_dir": arcs_dir}
+
+
+def load_canon_bundle(project_dir: str) -> Dict[str, Any]:
+    """
+    读取 Canon 四件套（world/characters/timeline/style），用于写作/审核注入。
+    """
+    canon_dir = os.path.join(project_dir, "canon")
+    return {
+        "world": read_json(os.path.join(canon_dir, "world.json")) or {},
+        "characters": read_json(os.path.join(canon_dir, "characters.json")) or {},
+        "timeline": read_json(os.path.join(canon_dir, "timeline.json")) or {},
+        "style": read_text_if_exists(os.path.join(canon_dir, "style.md")),
+    }
+
+
+def load_recent_chapter_memories(
+    project_dir: str, *, before_chapter: int, k: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    读取最近 k 章的 chapter memory（从 projects/<project>/memory/chapters 下取）。
+    - before_chapter：当前章号；会读取 < before_chapter 的历史记忆
+    - 只读取存在且能解析为 dict 的文件
+    """
+    mem_dir = os.path.join(project_dir, "memory", "chapters")
+    if not os.path.exists(mem_dir):
+        return []
+
+    # 从 before_chapter-1 倒序找
+    out: List[Dict[str, Any]] = []
+    for idx in range(before_chapter - 1, 0, -1):
+        if len(out) >= max(0, int(k)):
+            break
+        name = f"{idx:03d}.memory.json"
+        p = os.path.join(mem_dir, name)
+        obj = read_json(p)
+        if isinstance(obj, dict) and obj:
+            out.append(obj)
+    return out
+
+
+def build_recent_memory_synopsis(memories: List[Dict[str, Any]]) -> str:
+    """
+    将最近章节记忆压缩成“梗概串”，避免把完整 memory JSON 塞进 prompt。
+    """
+    if not memories:
+        return "（无）"
+    lines: List[str] = []
+    # memories 是倒序（最近在前），阅读更顺畅则反转为时间顺序
+    for m in reversed(memories):
+        chap = m.get("chapter_index", "")
+        summary = str(m.get("summary", "") or "").strip()
+        if not summary:
+            continue
+        # 控制每章梗概长度，避免 prompt 膨胀
+        if len(summary) > 280:
+            summary = summary[:260].rstrip() + "…"
+        lines.append(f"- 第{chap}章：{summary}")
+    return "\n".join(lines).strip() or "（无）"
 
 
 def archive_run(

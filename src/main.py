@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--max-rewrites", type=int, default=None, help="每章最多返工次数（覆盖配置）")
     parser.add_argument("--output-base", type=str, default="", help="输出根目录（覆盖配置）")
     parser.add_argument("--stage", type=str, default="", help="阶段名（用于归档，覆盖配置）")
+    parser.add_argument("--memory-recent-k", type=int, default=None, help="注入最近章节记忆数量（只注入梗概）")
     parser.add_argument("--archive", action="store_true", help="运行结束后自动归档（默认不归档，便于先review）")
     parser.add_argument(
         "--archive-only",
@@ -61,6 +62,7 @@ def main():
         idea=args.idea,
         output_base=args.output_base,
         stage=args.stage,
+        memory_recent_k=args.memory_recent_k,
         target_words=args.target_words,
         chapters=args.chapters,
         max_rewrites=args.max_rewrites,
@@ -169,6 +171,9 @@ def main():
         "debug": bool(settings.debug),
         "logger": logger,
         "output_dir": current_dir,
+        "project_dir": project_dir,
+        "stage": settings.stage,
+        "memory_recent_k": int(settings.memory_recent_k),
     }
 
     planned_state = planner_agent(base_state)
@@ -219,6 +224,10 @@ def main():
             "editor_used_llm": False,
             "chapter_memory": {},
             "memory_used_llm": False,
+            "project_dir": project_dir,
+            "stage": settings.stage,
+            "memory_recent_k": int(settings.memory_recent_k),
+            "editor_conflicts": [],
         }
         logger.event("chapter_start", chapter_index=idx)
         final_state = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
@@ -237,11 +246,15 @@ def main():
         write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), final_state.get("writer_result", ""))
         decision = final_state.get("editor_decision", "")
         feedback = final_state.get("editor_feedback", [])
+        conflicts = final_state.get("editor_conflicts", []) or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
             lines = ["审核不通过", "", *[f"- {x}" for x in feedback]]
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
+        # 结构化 conflicts：单独落盘，便于统计/自动化（归档时会随 current 一起复制）
+        if isinstance(conflicts, list) and conflicts:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.conflicts.json"), {"conflicts": conflicts})
 
         # chapter memory：写入 current + 持久化 projects
         mem = final_state.get("chapter_memory") or {}

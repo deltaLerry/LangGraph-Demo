@@ -13,6 +13,11 @@ class StoryState(TypedDict, total=False):
     chapters_total: int
 
     output_dir: str
+    # 持久化项目目录（outputs/projects/<project>），用于读取 canon/memory
+    project_dir: str
+    stage: str
+    # 写作/审核注入最近章节记忆数量（只用梗概 summary）
+    memory_recent_k: int
 
     planner_result: Dict[str, Any]
     planner_json: str
@@ -26,6 +31,8 @@ class StoryState(TypedDict, total=False):
     editor_feedback: List[str]
     needs_rewrite: bool
     editor_used_llm: bool
+    # 结构化冲突报告（用于统计/自动化；不直接喂给 writer）
+    editor_conflicts: List[Dict[str, Any]]
 
     # 章节记忆（审核通过后生成，用于长期一致性）
     chapter_memory: Dict[str, Any]

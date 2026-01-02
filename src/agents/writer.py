@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from state import StoryState
 from debug_log import truncate_text
+from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
 
 def writer_agent(state: StoryState) -> StoryState:
     """
@@ -52,12 +55,34 @@ def writer_agent(state: StoryState) -> StoryState:
                 writer_version=writer_version,
                 is_rewrite=is_rewrite,
             )
+
+        # === 2.1：注入 Canon + 最近记忆（控制长度） ===
+        project_dir = str(state.get("project_dir", "") or "")
+        canon = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+        k = int(state.get("memory_recent_k", 3) or 3)
+        recent_memories = load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k) if project_dir else []
+        canon_text = truncate_text(
+            json.dumps(
+                {
+                    "world": canon.get("world", {}) or {},
+                    "characters": canon.get("characters", {}) or {},
+                    "timeline": canon.get("timeline", {}) or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            max_chars=6000,
+        )
+        style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
+        memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
+
         if is_rewrite:
             system = SystemMessage(
                 content=(
                     "你是专业网文写手。你会严格按照主编的具体修改意见对稿件进行重写。\n"
                     "要求：逻辑自洽、避免AI腔、句式多样、节奏紧凑。\n"
                     f"目标字数：约 {target_words} 字。\n"
+                    "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "只输出正文，不要额外说明。"
                 )
             )
@@ -67,6 +92,12 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"章节：第{chapter_index}章 / 共{chapters_total}章\n"
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
+                    "【Canon 设定（必须遵守）】\n"
+                    f"{canon_text}\n\n"
+                    "【文风约束（必须遵守）】\n"
+                    f"{style_text}\n\n"
+                    "【最近章节记忆（参考，避免矛盾）】\n"
+                    f"{memories_text}\n\n"
                     "主编修改意见：\n"
                     + "\n".join([f"- {x}" for x in feedback])
                     + "\n\n"
@@ -79,6 +110,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "你是专业网文写手，擅长把一个点子写成逻辑通顺、画面感强的短篇开篇。\n"
                     "要求：中文；自然流畅；有冲突与钩子；避免AI感。\n"
                     f"目标字数：约 {target_words} 字。\n"
+                    "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "只输出正文，不要标题以外的任何说明。"
                 )
             )
@@ -88,6 +120,12 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"章节：第{chapter_index}章 / 共{chapters_total}章\n"
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
+                    "【Canon 设定（必须遵守）】\n"
+                    f"{canon_text}\n\n"
+                    "【文风约束（必须遵守）】\n"
+                    f"{style_text}\n\n"
+                    "【最近章节记忆（参考，避免矛盾）】\n"
+                    f"{memories_text}\n\n"
                     "请直接输出正文："
                 )
             )

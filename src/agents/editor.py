@@ -1,7 +1,46 @@
 from __future__ import annotations
 
+import json
+
 from state import StoryState
 from debug_log import truncate_text
+from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
+
+_CONFLICTS_MARKER = "CONFLICTS_JSON:"
+
+
+def _extract_conflicts(text: str) -> tuple[str, list[dict]]:
+    """
+    从主编输出中抽取 conflicts JSON 附录。
+    约定格式：
+    - 正文部分：审核通过/审核不通过 + 修改清单
+    - 附录：单独一行以 'CONFLICTS_JSON:' 开头，后面紧跟 JSON（可以换行）
+    返回：(去掉附录后的文本, conflicts列表)
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return raw, []
+    if _CONFLICTS_MARKER not in raw:
+        return raw, []
+    before, after = raw.split(_CONFLICTS_MARKER, 1)
+    json_part = after.strip()
+    conflicts: list[dict] = []
+    if json_part:
+        try:
+            obj = json.loads(json_part)
+            if isinstance(obj, list):
+                conflicts = [x for x in obj if isinstance(x, dict)]
+            elif isinstance(obj, dict):
+                # 允许 {"conflicts":[...]} 或直接 dict
+                inner = obj.get("conflicts")
+                if isinstance(inner, list):
+                    conflicts = [x for x in inner if isinstance(x, dict)]
+                else:
+                    conflicts = [obj]
+        except Exception:
+            conflicts = []
+    return before.strip(), conflicts
+
 
 def editor_agent(state: StoryState) -> StoryState:
     """
@@ -32,19 +71,56 @@ def editor_agent(state: StoryState) -> StoryState:
     if llm:
         if logger:
             logger.event("node_start", node="editor", chapter_index=state.get("chapter_index", 1))
+
+        # === 2.1：注入 Canon + 最近记忆（控制长度） ===
+        chapter_index = int(state.get("chapter_index", 1))
+        project_dir = str(state.get("project_dir", "") or "")
+        canon = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+        k = int(state.get("memory_recent_k", 3) or 3)
+        recent_memories = load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k) if project_dir else []
+        canon_text = truncate_text(
+            json.dumps(
+                {
+                    "world": canon.get("world", {}) or {},
+                    "characters": canon.get("characters", {}) or {},
+                    "timeline": canon.get("timeline", {}) or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            max_chars=6000,
+        )
+        style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
+        memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
+
         system = SystemMessage(
             content=(
                 "你是苛刻的编辑部主编，负责最终稿件质量拍板。\n"
                 "你必须严格遵守输出规则：\n"
                 "- 通过：只输出“审核通过”四个字\n"
                 "- 不通过：第一行输出“审核不通过”，并另起一段用清单列出具体修改意见\n"
-                "要求：修改意见必须极其具体、可执行。"
+                "要求：修改意见必须极其具体、可执行。\n"
+                "一致性要求：必须对照 Canon 设定（世界观/人物卡/时间线/文风）与最近章节记忆，指出矛盾点。\n"
+                "如果不通过：每条建议尽量包含【冲突依据】+【正文定位（引用原句/段）】+【改法】。"
+                "\n\n"
+                "额外要求（结构化冲突附录）：\n"
+                "如果不通过：在清单之后，另起一行输出下面标记，然后输出 JSON（不要 markdown 代码块）：\n"
+                f"{_CONFLICTS_MARKER}\n"
+                '[{"type":"world|character|timeline|style","canon_key":"string","quote":"string","fix":"string"}]\n'
+                "说明：quote 必须直接引用正文原句/原段；canon_key 尽量写对应的设定键路径/名称；fix 给出可执行改法。\n"
+                "如果通过：不要输出附录。"
             )
         )
         human = HumanMessage(
             content=(
                 f"项目名称：{project_name}\n"
                 f"策划任务（参考）：{planner_result}\n\n"
+                "【Canon 设定（真值来源）】\n"
+                f"{canon_text}\n\n"
+                "【文风约束】\n"
+                f"{style_text}\n\n"
+                "【最近章节记忆（参考）】\n"
+                f"{memories_text}\n\n"
                 "正文：\n"
                 f"{writer_result}\n"
             )
@@ -69,7 +145,11 @@ def editor_agent(state: StoryState) -> StoryState:
                 chapter_index=state.get("chapter_index", 1),
                 content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
             )
-        if text.startswith("审核通过"):
+        # 解析 conflicts 附录（只在不通过时要求输出）
+        text_main, conflicts = _extract_conflicts(text)
+        state["editor_conflicts"] = conflicts
+
+        if text_main.startswith("审核通过"):
             state["editor_decision"] = "审核通过"
             state["editor_feedback"] = []
             state["needs_rewrite"] = False
@@ -82,12 +162,13 @@ def editor_agent(state: StoryState) -> StoryState:
                     used_llm=True,
                     editor_decision="审核通过",
                     feedback_count=0,
+                    conflicts_count=len(state.get("editor_conflicts", []) or []),
                 )
             return state
 
         # 否则视为不通过：抽取清单
         feedback_lines = []
-        for line in text.splitlines():
+        for line in text_main.splitlines():
             s = line.strip()
             if not s or s == "审核不通过":
                 continue
@@ -107,6 +188,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 used_llm=True,
                 editor_decision="审核不通过",
                 feedback_count=len(state.get("editor_feedback", []) or []),
+                conflicts_count=len(state.get("editor_conflicts", []) or []),
             )
         return state
 
@@ -131,6 +213,7 @@ def editor_agent(state: StoryState) -> StoryState:
         state["editor_feedback"] = []
         state["needs_rewrite"] = False
     state["editor_used_llm"] = False
+    state["editor_conflicts"] = []
     if logger:
         logger.event(
             "node_end",
@@ -139,6 +222,7 @@ def editor_agent(state: StoryState) -> StoryState:
             used_llm=False,
             editor_decision=str(state.get("editor_decision", "")),
             feedback_count=len(state.get("editor_feedback", []) or []),
+            conflicts_count=len(state.get("editor_conflicts", []) or []),
         )
 
     return state

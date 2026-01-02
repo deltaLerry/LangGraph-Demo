@@ -8,6 +8,9 @@ output_base = "outputs"
 # 阶段：用于归档/持久化记录（例如 stage1 / stage2 / stage3）
 stage = "stage1"
 
+# 写作/审核时注入“最近章节记忆”的数量（只注入梗概 summary）
+memory_recent_k = 3
+
 # 运行模式：
 # - "template"：强制模板（用于纯工作流验证，不走LLM）
 # - "llm"：强制LLM（未配置LLM时将报错）
