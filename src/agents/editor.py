@@ -1,11 +1,54 @@
 from __future__ import annotations
 
 import json
+import re
+from typing import Any, Dict, List, Tuple
 
 from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
 from llm_meta import extract_finish_reason_and_usage
+
+
+def _extract_first_json_obj(text: str) -> Dict[str, Any]:
+    """
+    兼容 LLM 输出带 ```json ... ``` 或前后缀的情况。
+    """
+    s = (text or "").strip()
+    if not s:
+        return {}
+    # 先尝试直接解析
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    # 再抽取第一个 { ... }
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _format_issue_to_text(issue: Dict[str, Any]) -> str:
+    t = str(issue.get("type", "") or "").strip() or "N/A"
+    canon_key = str(issue.get("canon_key", "") or "").strip() or "N/A"
+    quote = str(issue.get("quote", "") or "").strip()
+    problem = str(issue.get("issue", "") or "").strip()
+    fix = str(issue.get("fix", "") or "").strip()
+    action = str(issue.get("action", "") or "").strip() or "rewrite"
+    parts = [f"【类型】{t}", f"【CanonKey】{canon_key}", f"【动作】{action}"]
+    if quote:
+        parts.append(f"【引用】{quote}")
+    if problem:
+        parts.append(f"【问题】{problem}")
+    if fix:
+        parts.append(f"【改法】{fix}")
+    return " ".join(parts).strip()
 
 def editor_agent(state: StoryState) -> StoryState:
     """
@@ -61,21 +104,32 @@ def editor_agent(state: StoryState) -> StoryState:
         system = SystemMessage(
             content=(
                 "你是苛刻的编辑部主编，负责最终稿件质量拍板。\n"
-                "你必须严格遵守输出规则：\n"
-                "- 通过：只输出“审核通过”四个字\n"
-                "- 不通过：第一行输出“审核不通过”，并另起一段用清单列出具体修改意见\n"
-                "要求：修改意见必须极其具体、可执行。\n"
+                "你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown、不要多余文字）。\n"
                 "一致性优先级：\n"
                 "1) 先对照 Canon 设定（world/characters/timeline/style），这是“真值来源”\n"
                 "2) 再对照最近章节记忆（用于情节连续性）\n"
                 "3) planner 任务仅作参考（不可覆盖 Canon）\n"
-                "如果不通过：每条修改意见必须使用下面模板（请直接写在同一条 bullet 里）：\n"
-                "- 【类型】world|character|timeline|style|logic|readability\n"
-                "  【CanonKey】（若是设定冲突必填，例如 characters.characters[0].taboos 或 world.rules[2].name；非设定冲突可写 N/A）\n"
-                "  【引用】从正文中直接复制 1 句或 1 段原文（必须原样引用）\n"
-                "  【问题】简明指出矛盾/不一致/问题点\n"
-                "  【改法】给出可执行改写方案（尽量具体到怎么改一句/哪段增删）\n"
-                "注意：如果找不到引用原文，请不要输出该条（宁可少而准）。"
+                "输出 JSON schema：\n"
+                "{\n"
+                '  "decision": "审核通过|审核不通过",\n'
+                '  "issues": [\n'
+                "    {\n"
+                '      "type": "world|character|timeline|style|logic|readability",\n'
+                '      "canon_key": "string|N/A",\n'
+                '      "quote": "string",\n'
+                '      "issue": "string",\n'
+                '      "fix": "string",\n'
+                '      "action": "rewrite|canon_patch",\n'
+                '      "canon_patch": {"target":"world.json|characters.json|timeline.json|style.md|N/A","op":"append|upsert|note|N/A","path":"string|N/A","value":"any|N/A"}\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "要求：\n"
+                "- decision=审核通过 时 issues 为空数组。\n"
+                "- decision=审核不通过 时：每条 issue 必须包含 quote（从正文原样复制）。\n"
+                "- canon_key：若属于设定冲突/缺失，尽量给出可定位的路径（例如 characters.characters[0].taboos / world.rules[2].name）；否则写 N/A。\n"
+                "- action=canon_patch 仅在“Canon 明显缺失/需补充（非正文错误）”时使用；否则用 rewrite。\n"
+                "- 宁可少而准：如果找不到 quote，不要输出该条。"
             )
         )
         human = HumanMessage(
@@ -115,44 +169,67 @@ def editor_agent(state: StoryState) -> StoryState:
                 finish_reason=finish_reason,
                 token_usage=token_usage,
             )
-        if text.startswith("审核通过"):
-            state["editor_decision"] = "审核通过"
-            state["editor_feedback"] = []
-            state["needs_rewrite"] = False
-            state["editor_used_llm"] = True
-            if logger:
-                logger.event(
-                    "node_end",
-                    node="editor",
-                    chapter_index=state.get("chapter_index", 1),
-                    used_llm=True,
-                    editor_decision="审核通过",
-                    feedback_count=0,
-                )
-            return state
+        # 优先按 JSON 解析（推荐路径）
+        report = _extract_first_json_obj(text)
+        decision = str(report.get("decision", "") or "").strip()
+        issues_obj = report.get("issues")
+        issues_list: List[Dict[str, Any]] = [x for x in issues_obj if isinstance(x, dict)] if isinstance(issues_obj, list) else []
 
-        # 否则视为不通过：抽取清单
-        feedback_lines = []
-        for line in text.splitlines():
-            s = line.strip()
-            if not s or s == "审核不通过":
-                continue
-            if s.startswith(("-", "•", "*")):
-                feedback_lines.append(s.lstrip("-•* ").strip())
+        # 兼容旧文本输出（兜底）
+        if decision not in ("审核通过", "审核不通过"):
+            if text.startswith("审核通过"):
+                decision = "审核通过"
+                issues_list = []
             else:
-                feedback_lines.append(s)
-        state["editor_decision"] = "审核不通过"
-        state["editor_feedback"] = [x for x in feedback_lines if x]
-        state["needs_rewrite"] = True
+                decision = "审核不通过"
+                # 把全文按行抽成反馈字符串
+                feedback_lines = []
+                for line in text.splitlines():
+                    s = line.strip()
+                    if not s or s == "审核不通过":
+                        continue
+                    if s.startswith(("-", "•", "*")):
+                        feedback_lines.append(s.lstrip("-•* ").strip())
+                    else:
+                        feedback_lines.append(s)
+                issues_list = [
+                    {
+                        "type": "N/A",
+                        "canon_key": "N/A",
+                        "quote": "",
+                        "issue": s,
+                        "fix": "",
+                        "action": "rewrite",
+                        "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
+                    }
+                    for s in feedback_lines
+                    if s
+                ]
+
+        state["editor_report"] = {"decision": decision, "issues": issues_list}
+        state["editor_decision"] = decision
         state["editor_used_llm"] = True
+        state["needs_rewrite"] = decision != "审核通过"
+
+        # 生成 writer 可用的可读反馈
+        state["editor_feedback"] = [_format_issue_to_text(it) for it in issues_list]
+
+        # 分离 canon_suggestions（只落盘，不自动应用）
+        canon_suggestions: List[Dict[str, Any]] = []
+        for it in issues_list:
+            if str(it.get("action", "") or "").strip() == "canon_patch":
+                canon_suggestions.append(it)
+        state["canon_suggestions"] = canon_suggestions
+
         if logger:
             logger.event(
                 "node_end",
                 node="editor",
                 chapter_index=state.get("chapter_index", 1),
                 used_llm=True,
-                editor_decision="审核不通过",
+                editor_decision=str(state.get("editor_decision", "")),
                 feedback_count=len(state.get("editor_feedback", []) or []),
+                canon_suggestions_count=len(canon_suggestions),
             )
         return state
 
@@ -171,10 +248,28 @@ def editor_agent(state: StoryState) -> StoryState:
     if issues:
         state["editor_decision"] = "审核不通过"
         state["editor_feedback"] = issues
+        state["editor_report"] = {
+            "decision": "审核不通过",
+            "issues": [
+                {
+                    "type": "readability",
+                    "canon_key": "N/A",
+                    "quote": "",
+                    "issue": x,
+                    "fix": "",
+                    "action": "rewrite",
+                    "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
+                }
+                for x in issues
+            ],
+        }
+        state["canon_suggestions"] = []
         state["needs_rewrite"] = True
     else:
         state["editor_decision"] = "审核通过"
         state["editor_feedback"] = []
+        state["editor_report"] = {"decision": "审核通过", "issues": []}
+        state["canon_suggestions"] = []
         state["needs_rewrite"] = False
     state["editor_used_llm"] = False
     if logger:

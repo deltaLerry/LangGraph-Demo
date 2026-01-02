@@ -298,6 +298,8 @@ def main():
             "needs_rewrite": False,
             "editor_feedback": [],
             "editor_decision": "",
+            "editor_report": {},
+            "canon_suggestions": [],
             "writer_used_llm": False,
             "editor_used_llm": False,
             "chapter_memory": {},
@@ -323,11 +325,21 @@ def main():
         write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), final_state.get("writer_result", ""))
         decision = final_state.get("editor_decision", "")
         feedback = final_state.get("editor_feedback", [])
+        editor_report = final_state.get("editor_report") or {}
+        canon_suggestions = final_state.get("canon_suggestions") or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
             lines = ["审核不通过", "", *[f"- {x}" for x in feedback]]
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
+
+        # 结构化落盘：editor_report（便于后续自动化/追溯）
+        if isinstance(editor_report, dict) and editor_report:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"), editor_report)
+
+        # 结构化落盘：canon_suggestions（默认不自动应用，仅供 review）
+        if isinstance(canon_suggestions, list) and canon_suggestions:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_suggestions.json"), {"items": canon_suggestions})
 
         # chapter memory：写入 current + 持久化 projects
         mem = final_state.get("chapter_memory") or {}

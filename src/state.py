@@ -35,6 +35,10 @@ class StoryState(TypedDict, total=False):
 
     editor_decision: str  # "审核通过" | "审核不通过"
     editor_feedback: List[str]
+    # editor 的结构化报告（用于落盘与后续自动化处理）
+    editor_report: Dict[str, Any]
+    # 建议更新 Canon 的结构化条目（默认不自动应用，只落盘供人工 review）
+    canon_suggestions: List[Dict[str, Any]]
     needs_rewrite: bool
     editor_used_llm: bool
 
