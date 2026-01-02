@@ -25,6 +25,7 @@ class StoryState(TypedDict, total=False):
     planner_result: Dict[str, Any]
     planner_json: str
     planner_used_llm: bool
+    planner_tasks: List[Dict[str, str]]
 
     writer_result: str
     writer_version: int

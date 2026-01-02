@@ -30,6 +30,16 @@ chapters = 1
 # 每章最多返工次数（不含首稿）
 max_rewrites = 2
 
+[planner]
+# 策划任务槽位：根据“当前启用的上游 agent”决定拆分哪些任务、派给谁。
+# 你后续进入 3.0（并行架构师/角色导演/编剧）时，就在这里增删/调整任务即可。
+tasks = [
+  { task_name = "世界观设定", executor = "架构师", hint = "构建世界背景、规则、势力与核心冲突，要求可用于写作约束（Canon）" },
+  { task_name = "核心角色", executor = "角色导演", hint = "产出主要人物卡：性格、动机、能力、禁忌、关系网" },
+  { task_name = "主线脉络", executor = "编剧", hint = "给出主线推进的关键节点与前期节奏安排" },
+  { task_name = "开篇基调", executor = "策划", hint = "明确文风/视角/节奏/情绪基调，给写手可执行的风格约束" },
+]
+
 [llm]
 # DeepSeek（OpenAI兼容）
 base_url = "https://api.deepseek.com/v1"

@@ -17,10 +17,9 @@ pip install -r requirements.txt
 python src\main.py --idea '一个普通人意外进入修仙世界，被迫卷入宗门纷争'
 ```
 
-运行后会在`outputs/`下生成一次运行目录，包含：
-- `planner.json`
-- `chapter_1.md`（以及多章节时的`chapter_2.md`...）
-- `editor_1.md`（以及多章节时的`editor_2.md`...）
+运行后会写入：
+- `outputs/current/`：本次尝试输出（每次运行覆盖）
+- `outputs/projects/<project>/`：持久化目录（Canon / chapter memory / 手动归档）
 
 如果控制台中文出现乱码，可先执行：
 
@@ -59,6 +58,66 @@ python src\main.py --idea "..." --target-words 800 --chapters 3 --max-rewrites 2
 - 项目根目录的`.env`
 - 当前工作目录的`.env`（兜底）
 
+## 最小配置示例（推荐做法：config.toml + .env）
+
+目标：把**非敏感默认值**放进 `config.toml`，把 **API Key** 放进 `.env`（不要提交到 git）。
+
+### 1) `config.toml`（示例）
+
+（仓库已自带一个 `config.toml`，你也可以新建/修改）
+
+```toml
+[app]
+idea = "一个普通人意外进入修仙世界，被迫卷入宗门纷争"
+output_base = "outputs"
+stage = "stage1"
+memory_recent_k = 3
+llm_mode = "auto" # auto/llm/template
+debug = true
+
+[generation]
+target_words = 800
+chapters = 1
+max_rewrites = 2
+```
+
+### 2) `.env`（示例）
+
+在项目根目录创建 `.env`，写入：
+
+```bash
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_API_KEY=sk-REPLACE_ME
+LLM_MODEL=deepseek-chat
+```
+
+### 3) 运行
+
+- 自动模式（推荐：有 LLM 就用 LLM，没有就走模板）：
+
+```bash
+python src\main.py
+```
+
+- 强制走 LLM（LLM 配置不完整会直接报错）：
+
+```bash
+python src\main.py --llm-mode llm
+```
+
+## 输出目录说明（落盘结构）
+
+- `outputs/current/`（一次尝试）
+  - `planner.json`
+  - `run_meta.json`
+  - `chapters/001.md`、`chapters/001.editor.md`、`chapters/001.memory.json`（仅“审核通过”时生成 memory）
+  - `debug.jsonl` / `call_graph.md`（开启 debug 时）
+- `outputs/projects/<project>/`（持久化）
+  - `canon/`：`world.json` / `characters.json` / `timeline.json` / `style.md`
+  - `memory/chapters/`：长期 chapter memory（用于续写/一致性）
+  - `stages/<stage>/runs/<run_id>/`：手动归档后的快照（review 通过后再入库）
+  - `project_meta.json`：项目元信息（用于 `--resume` 复用策划）
+
 ## Debug日志与节点调用图
 开启debug后，每次运行会在输出目录生成：
 - `debug.jsonl`：结构化运行日志（节点开始/结束、LLM输入输出、耗时、异常等）
@@ -80,6 +139,16 @@ python src\main.py --debug
 python src\main.py --config config.toml
 ```
 
+### 常用 CLI 参数
+
+- `--stage stage1`：归档阶段名（用于 `stages/<stage>/...`）
+- `--memory-recent-k 3`：注入最近章节“梗概记忆”的数量（只注入 summary）
+- `--archive`：运行结束后自动归档（默认不归档，建议先 review）
+- `--archive-only`：只归档当前 `outputs/current`（review 通过后手动入库）
+- `--project "<name>"`：指定项目名（用于续写/固定 `projects/<project>`）
+- `--resume`：续写模式（复用 `project_meta.json`，起始章自动为已有最大章+1）
+- `--start-chapter 101`：显式指定从第101章开始写（不依赖自动推断）
+
 ## 运行模式：LLM vs 模板
 为了方便“纯工作流验证”，新增了运行模式开关：
 - `template`：强制走模板（不初始化LLM）
@@ -90,6 +159,20 @@ python src\main.py --config config.toml
 
 ```bash
 python src\main.py --llm-mode template
+```
+
+## 续写（例如已有100章，继续写第101章）
+
+推荐用 `--project + --resume`：
+
+```bash
+python src\main.py --project "你的项目名" --resume --chapters 1
+```
+
+或显式指定起始章节：
+
+```bash
+python src\main.py --project "你的项目名" --start-chapter 101 --chapters 1
 ```
 
 ## 文档

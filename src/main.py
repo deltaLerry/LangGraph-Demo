@@ -97,6 +97,9 @@ def main():
         output_base = os.path.join(os.path.dirname(config_abs), output_base)
     os.makedirs(output_base, exist_ok=True)
 
+    if args.resume and not args.project.strip():
+        raise ValueError("续写模式必须指定 --project（用于定位 outputs/projects/<project>）")
+
     # 手动归档模式：你review完 outputs/current 后再跑一次这个命令即可入库
     if args.archive_only:
         current_dir = os.path.join(output_base, "current")
@@ -164,12 +167,6 @@ def main():
         # 让异常继续向上抛出，但日志已记录 span_error
         raise
 
-    # === 解析项目目录（修复：此前这里 project_dir 可能未定义） ===
-    project_name_hint = args.project.strip() or (settings.idea or "story")
-    project_dir = get_project_dir(output_base, project_name_hint)
-    ensure_canon_files(project_dir)
-    mem_dirs = ensure_memory_dirs(project_dir)
-
     # 初始化 state（先跑策划一次 / 或 resume 复用）
     base_state: StoryState = {
         "user_input": settings.idea,
@@ -183,20 +180,23 @@ def main():
         "debug": bool(settings.debug),
         "logger": logger,
         "output_dir": current_dir,
-        "project_dir": project_dir,
         "stage": settings.stage,
         "memory_recent_k": int(settings.memory_recent_k),
+        "planner_tasks": settings.planner_tasks or [],
     }
 
-    # planner：续写时优先复用 project_meta.json，避免每次重规划
-    project_meta_path = os.path.join(project_dir, "project_meta.json")
     planned_state: StoryState
     if args.resume:
+        # resume：先用 --project 定位项目目录，再复用 planner_result
+        project_dir = get_project_dir(output_base, args.project.strip())
+        ensure_canon_files(project_dir)
+        mem_dirs = ensure_memory_dirs(project_dir)
+        project_meta_path = os.path.join(project_dir, "project_meta.json")
         meta = read_json(project_meta_path) or {}
         meta_planner = meta.get("planner_result") if isinstance(meta.get("planner_result"), dict) else None
         meta_name = str(meta.get("project_name") or "").strip()
         if meta_planner:
-            planned_state = {**base_state}
+            planned_state = {**base_state, "project_dir": project_dir}
             planned_state["planner_result"] = meta_planner
             planned_state["planner_json"] = json.dumps(meta_planner, ensure_ascii=False, indent=2)
             planned_state["planner_used_llm"] = bool(meta.get("planner_used_llm", False))
@@ -214,9 +214,12 @@ def main():
     if not args.project.strip():
         project_name_final = str(project_name or settings.idea or "story")
         project_dir = get_project_dir(output_base, project_name_final)
-        ensure_canon_files(project_dir)
-        mem_dirs = ensure_memory_dirs(project_dir)
-        planned_state["project_dir"] = project_dir
+    else:
+        project_dir = get_project_dir(output_base, args.project.strip())
+
+    ensure_canon_files(project_dir)
+    mem_dirs = ensure_memory_dirs(project_dir)
+    planned_state["project_dir"] = project_dir
 
     # 阶段2.2：初始化 Canon（仅在占位时写入，避免覆盖人工维护）
     planned_state["project_dir"] = project_dir
@@ -228,7 +231,7 @@ def main():
     write_json(
         os.path.join(project_dir, "project_meta.json"),
         {
-            "project_name": str(project_name or args.project.strip() or project_name_hint),
+            "project_name": str(project_name or args.project.strip() or ""),
             "idea": str(settings.idea or ""),
             "planner_result": planner_result if isinstance(planner_result, dict) else {},
             "planner_used_llm": bool(planned_state.get("planner_used_llm", False)),

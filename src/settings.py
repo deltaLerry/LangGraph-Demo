@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from config import LLMConfig, load_llm_config_from_env
 
@@ -23,6 +23,9 @@ class AppSettings:
     stage: str = "stage1"
     # 写作/审核时注入“最近章节记忆”的数量（只用梗概，不塞全文）
     memory_recent_k: int = 3
+
+    # planner 任务槽位：根据当前启用的 agent 决定拆分哪些任务
+    planner_tasks: List[Dict[str, str]] = None  # type: ignore[assignment]
 
     # 运行模式：template / llm / auto
     llm_mode: str = "auto"
@@ -101,11 +104,33 @@ def load_settings(
     cfg_app = raw.get("app", {}) if isinstance(raw.get("app", {}), dict) else {}
     cfg_llm = raw.get("llm", {}) if isinstance(raw.get("llm", {}), dict) else {}
     cfg_gen = raw.get("generation", {}) if isinstance(raw.get("generation", {}), dict) else {}
+    cfg_planner = raw.get("planner", {}) if isinstance(raw.get("planner", {}), dict) else {}
 
     cfg_idea = str(cfg_app.get("idea", "") or "").strip() or AppSettings.idea
     cfg_output_base = str(cfg_app.get("output_base", "") or "").strip() or AppSettings.output_base
     cfg_stage = str(cfg_app.get("stage", "") or "").strip() or AppSettings.stage
     cfg_memory_recent_k = int(cfg_app.get("memory_recent_k", AppSettings.memory_recent_k))
+    default_planner_tasks: List[Dict[str, str]] = [
+        {"task_name": "世界观设定", "executor": "架构师", "hint": "构建世界背景、规则、势力与核心冲突"},
+        {"task_name": "核心角色", "executor": "角色导演", "hint": "产出主要人物卡：性格、动机、能力、禁忌、关系网"},
+        {"task_name": "主线脉络", "executor": "编剧", "hint": "给出主线推进的关键节点与前期节奏安排"},
+        {"task_name": "开篇基调", "executor": "策划", "hint": "明确文风/视角/节奏/情绪基调"},
+    ]
+
+    cfg_tasks_raw = cfg_planner.get("tasks", None)
+    cfg_planner_tasks: List[Dict[str, str]] = default_planner_tasks
+    if isinstance(cfg_tasks_raw, list) and cfg_tasks_raw:
+        cleaned: List[Dict[str, str]] = []
+        for it in cfg_tasks_raw:
+            if not isinstance(it, dict):
+                continue
+            tn = str(it.get("task_name", "") or "").strip()
+            ex = str(it.get("executor", "") or "").strip()
+            hint = str(it.get("hint", "") or "").strip()
+            if tn and ex:
+                cleaned.append({"task_name": tn, "executor": ex, "hint": hint})
+        if cleaned:
+            cfg_planner_tasks = cleaned
     cfg_llm_mode = str(cfg_app.get("llm_mode", "") or "").strip().lower() or AppSettings.llm_mode
     cfg_debug = bool(cfg_app.get("debug", AppSettings.debug))
 
@@ -118,6 +143,7 @@ def load_settings(
     env_output_base = (os.getenv("OUTPUT_BASE", "") or "").strip()
     env_stage = (os.getenv("STAGE", "") or os.getenv("APP_STAGE", "") or "").strip()
     env_memory_recent_k = (os.getenv("MEMORY_RECENT_K", "") or "").strip()
+    env_planner_tasks = (os.getenv("PLANNER_TASKS_JSON", "") or "").strip()
     env_llm_mode = (os.getenv("LLM_MODE", "") or "").strip().lower()
     env_debug = (os.getenv("DEBUG", "") or os.getenv("APP_DEBUG", "") or "").strip().lower()
     env_target_words = os.getenv("TARGET_WORDS", "").strip()
@@ -136,11 +162,30 @@ def load_settings(
     final_output_base = env_output_base or cfg_output_base
     final_stage = env_stage or cfg_stage
     final_memory_recent_k = cfg_memory_recent_k
+    final_planner_tasks = cfg_planner_tasks
     if env_memory_recent_k:
         try:
             final_memory_recent_k = int(env_memory_recent_k)
         except ValueError:
             final_memory_recent_k = cfg_memory_recent_k
+
+    if env_planner_tasks:
+        try:
+            obj = __import__("json").loads(env_planner_tasks)
+            if isinstance(obj, list) and obj:
+                cleaned: List[Dict[str, str]] = []
+                for it in obj:
+                    if not isinstance(it, dict):
+                        continue
+                    tn = str(it.get("task_name", "") or "").strip()
+                    ex = str(it.get("executor", "") or "").strip()
+                    hint = str(it.get("hint", "") or "").strip()
+                    if tn and ex:
+                        cleaned.append({"task_name": tn, "executor": ex, "hint": hint})
+                if cleaned:
+                    final_planner_tasks = cleaned
+        except Exception:
+            pass
     final_llm_mode = env_llm_mode or cfg_llm_mode
     final_debug = cfg_debug
     if env_debug in ("1", "true", "yes", "on"):
@@ -209,6 +254,7 @@ def load_settings(
         output_base=final_output_base,
         stage=final_stage,
         memory_recent_k=final_memory_recent_k,
+        planner_tasks=final_planner_tasks,
         llm_mode=final_llm_mode,
         debug=final_debug,
         gen=GenerationSettings(

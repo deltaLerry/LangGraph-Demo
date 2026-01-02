@@ -10,6 +10,9 @@ from typing import Any, Dict, Optional, List, Tuple
 
 def safe_filename(name: str, fallback: str = "project") -> str:
     name = (name or "").strip() or fallback
+    # 规范化：去掉常见“书名号/引号”包裹，避免同名项目产生两个目录
+    name = re.sub(r'^[《「『“"\']+', "", name)
+    name = re.sub(r'[》」』”"\']+$', "", name)
     # Windows 文件名非法字符：\ / : * ? " < > |
     name = re.sub(r'[\\/:*?"<>|]+', "_", name)
     name = re.sub(r"\s+", " ", name).strip()
