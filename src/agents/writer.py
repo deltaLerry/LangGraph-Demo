@@ -5,6 +5,7 @@ import json
 from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
+from llm_meta import extract_finish_reason_and_usage
 
 def writer_agent(state: StoryState) -> StoryState:
     """
@@ -81,8 +82,9 @@ def writer_agent(state: StoryState) -> StoryState:
                 content=(
                     "你是专业网文写手。你会严格按照主编的具体修改意见对稿件进行重写。\n"
                     "要求：逻辑自洽、避免AI腔、句式多样、节奏紧凑。\n"
-                    f"目标字数：约 {target_words} 字。\n"
+                    f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要额外说明。"
                 )
             )
@@ -109,8 +111,9 @@ def writer_agent(state: StoryState) -> StoryState:
                 content=(
                     "你是专业网文写手，擅长把一个点子写成逻辑通顺、画面感强的短篇开篇。\n"
                     "要求：中文；自然流畅；有冲突与钩子；避免AI感。\n"
-                    f"目标字数：约 {target_words} 字。\n"
+                    f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要标题以外的任何说明。"
                 )
             )
@@ -142,7 +145,9 @@ def writer_agent(state: StoryState) -> StoryState:
                 resp = llm.invoke([system, human])
         else:
             resp = llm.invoke([system, human])
-        state["writer_result"] = (getattr(resp, "content", "") or "").strip()
+        text0 = (getattr(resp, "content", "") or "").strip()
+        finish_reason, token_usage = extract_finish_reason_and_usage(resp)
+        state["writer_result"] = text0
         if logger:
             logger.event(
                 "llm_response",
@@ -150,7 +155,95 @@ def writer_agent(state: StoryState) -> StoryState:
                 chapter_index=chapter_index,
                 writer_version=writer_version,
                 content=truncate_text(state["writer_result"], max_chars=getattr(logger, "max_chars", 20000)),
+                finish_reason=finish_reason,
+                token_usage=token_usage,
             )
+
+        # === 字数硬约束 & 被截断自动补全 ===
+        # 说明：这里的“字数”按中文字符数近似（含标点/空白），用于工程约束，不追求严格统计口径。
+        target = int(state.get("target_words", 800))
+        min_chars = int(target * 0.85)
+        max_chars = int(target * 1.15)
+
+        def _need_continue(fr: str | None, s: str) -> bool:
+            if fr and fr.lower() == "length":
+                return True
+            return len(s) < min_chars
+
+        def _need_shorten(s: str) -> bool:
+            return len(s) > max_chars
+
+        # 1) length 截断/过短：续写补全（最多2段，避免死循环）
+        if _need_continue(finish_reason, state["writer_result"]):
+            cur = state["writer_result"]
+            for _ in range(2):
+                remaining = max(200, target - len(cur))
+                # 取末尾上下文，避免重复
+                tail = cur[-1200:] if len(cur) > 1200 else cur
+                system2 = SystemMessage(
+                    content=(
+                        "你是专业网文写手。请继续写作补全正文。\n"
+                        "要求：延续当前文风与叙事，不要复述已写内容，不要改变既有设定。\n"
+                        f"本次请补写约 {remaining} 字（中文字符数近似），并以一个自然段落结尾。\n"
+                        "只输出新增内容，不要标题，不要解释。"
+                    )
+                )
+                human2 = HumanMessage(
+                    content=(
+                        f"项目：{project_name}\n"
+                        f"章节：第{chapter_index}章 / 共{chapters_total}章\n\n"
+                        "已写正文末尾（用于承接）：\n"
+                        f"{tail}\n\n"
+                        "请从末尾自然续写："
+                    )
+                )
+                if logger:
+                    model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                    with logger.llm_call(
+                        node="writer_continue",
+                        chapter_index=chapter_index,
+                        messages=[system2, human2],
+                        model=model,
+                        base_url=str(getattr(llm, "base_url", "") or ""),
+                        extra={"writer_version": writer_version},
+                    ):
+                        resp2 = llm.invoke([system2, human2])
+                else:
+                    resp2 = llm.invoke([system2, human2])
+                add = (getattr(resp2, "content", "") or "").strip()
+                fr2, usage2 = extract_finish_reason_and_usage(resp2)
+                if logger:
+                    logger.event(
+                        "llm_response",
+                        node="writer_continue",
+                        chapter_index=chapter_index,
+                        writer_version=writer_version,
+                        content=truncate_text(add, max_chars=getattr(logger, "max_chars", 20000)),
+                        finish_reason=fr2,
+                        token_usage=usage2,
+                    )
+                if add:
+                    # 简单去重：避免重复粘贴尾部
+                    if add in cur:
+                        break
+                    cur = (cur.rstrip() + "\n\n" + add.lstrip()).strip()
+                # 如果已经够长或没有 length 截断，就结束
+                if len(cur) >= min_chars and (fr2 is None or fr2.lower() != "length"):
+                    break
+            state["writer_result"] = cur
+
+        # 2) 超长：不做自动压缩（按产品偏好避免二次改写带来的风格漂移）
+        if _need_shorten(state["writer_result"]) and logger:
+            logger.event(
+                "writer_length_warning",
+                chapter_index=chapter_index,
+                writer_version=writer_version,
+                target_chars=target,
+                min_chars=min_chars,
+                max_chars=max_chars,
+                actual_chars=len(state.get("writer_result", "") or ""),
+            )
+
         state["writer_used_llm"] = True
         if logger:
             logger.event(

@@ -9,6 +9,7 @@ from debug_log import truncate_text
 import os
 
 from storage import load_canon_bundle, read_json, write_json, write_text
+from llm_meta import extract_finish_reason_and_usage
 
 
 def _is_placeholder_world(world: Dict[str, Any]) -> bool:
@@ -171,6 +172,8 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 node="canon_init",
                 chapter_index=chapter_index,
                 content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
+                finish_reason=extract_finish_reason_and_usage(resp)[0],
+                token_usage=extract_finish_reason_and_usage(resp)[1],
             )
         obj = _extract_first_json_obj(text)
         new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}

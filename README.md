@@ -162,6 +162,17 @@ python src\main.py --config config.toml
 python src\main.py --llm-mode template
 ```
 
+## 字数/Token 的说明（避免被截断）
+
+- `--target-words` 在本项目中表示**每章目标“字数”**，实现上按**中文字符数（含标点/空白）近似**做约束。
+- LLM 有时会因 `max_tokens` 或上下文长度限制导致**输出被截断**（finish_reason=length）。
+- 现在开启 debug 后，会在 `outputs/current/debug.jsonl` 的每条 `llm_response` 里记录：
+  - `finish_reason`
+  - `token_usage`（如果模型/网关返回）
+- 写手节点已增加自动处理：
+  - **过短/被截断**：自动续写补全（最多 2 段）
+  - **过长**：不自动压缩（避免二次改写导致风格漂移），仅在日志中记录告警
+
 ## 续写（例如已有100章，继续写第101章）
 
 推荐用 `--project + --resume`：

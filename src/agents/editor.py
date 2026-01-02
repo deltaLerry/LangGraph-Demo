@@ -5,6 +5,7 @@ import json
 from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
+from llm_meta import extract_finish_reason_and_usage
 
 def editor_agent(state: StoryState) -> StoryState:
     """
@@ -105,11 +106,14 @@ def editor_agent(state: StoryState) -> StoryState:
             resp = llm.invoke([system, human])
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
+            finish_reason, token_usage = extract_finish_reason_and_usage(resp)
             logger.event(
                 "llm_response",
                 node="editor",
                 chapter_index=state.get("chapter_index", 1),
                 content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
+                finish_reason=finish_reason,
+                token_usage=token_usage,
             )
         if text.startswith("审核通过"):
             state["editor_decision"] = "审核通过"

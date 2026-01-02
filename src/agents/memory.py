@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from state import StoryState
 from debug_log import truncate_text
+from llm_meta import extract_finish_reason_and_usage
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -101,11 +102,14 @@ def memory_agent(state: StoryState) -> StoryState:
             resp = llm.invoke([system, human])
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
+            finish_reason, token_usage = extract_finish_reason_and_usage(resp)
             logger.event(
                 "llm_response",
                 node="memory",
                 chapter_index=chapter_index,
                 content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
+                finish_reason=finish_reason,
+                token_usage=token_usage,
             )
         mem = _extract_first_json_obj(text)
         mem["chapter_index"] = chapter_index

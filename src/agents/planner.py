@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, List
 
 from state import StoryState
 from debug_log import truncate_text
+from llm_meta import extract_finish_reason_and_usage
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -122,6 +123,8 @@ def planner_agent(state: StoryState) -> StoryState:
                 node="planner",
                 chapter_index=chapter_index,
                 content=truncate_text(str(getattr(resp, "content", "") or ""), max_chars=getattr(logger, "max_chars", 20000)),
+                finish_reason=extract_finish_reason_and_usage(resp)[0],
+                token_usage=extract_finish_reason_and_usage(resp)[1],
             )
         planner_result = _extract_first_json_obj(getattr(resp, "content", "") or "")
         state["planner_result"] = planner_result
