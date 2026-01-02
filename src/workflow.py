@@ -6,12 +6,13 @@ from state import StoryState
 from agents.planner import planner_agent
 from agents.writer import writer_agent
 from agents.editor import editor_agent
+from agents.memory import memory_agent
 
 
 def _next_step_after_editor(state: StoryState):
     needs_rewrite = bool(state.get("needs_rewrite", False))
     if not needs_rewrite:
-        return END
+        return "memory"
 
     writer_version = int(state.get("writer_version", 1))
     max_rewrites = int(state.get("max_rewrites", 1))
@@ -29,10 +30,12 @@ def build_chapter_app():
     graph = StateGraph(StoryState)
     graph.add_node("writer", writer_agent)
     graph.add_node("editor", editor_agent)
+    graph.add_node("memory", memory_agent)
 
     graph.set_entry_point("writer")
     graph.add_edge("writer", "editor")
-    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", END: END})
+    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", "memory": "memory", END: END})
+    graph.add_edge("memory", END)
     return graph.compile()
 
 
@@ -44,11 +47,13 @@ def build_app():
     graph.add_node("planner", planner_agent)
     graph.add_node("writer", writer_agent)
     graph.add_node("editor", editor_agent)
+    graph.add_node("memory", memory_agent)
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "writer")
     graph.add_edge("writer", "editor")
-    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", END: END})
+    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", "memory": "memory", END: END})
+    graph.add_edge("memory", END)
 
     return graph.compile()
 

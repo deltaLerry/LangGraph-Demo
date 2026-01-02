@@ -19,6 +19,8 @@ class AppSettings:
     # 基础
     idea: str = "一个普通人意外进入修仙世界，被迫卷入宗门纷争"
     output_base: str = "outputs"
+    # 阶段：用于归档/持久化记录（例如 stage1 / stage2 / stage3）
+    stage: str = "stage1"
 
     # 运行模式：template / llm / auto
     llm_mode: str = "auto"
@@ -49,6 +51,7 @@ def load_settings(
     *,
     idea: Optional[str] = None,
     output_base: Optional[str] = None,
+    stage: Optional[str] = None,
     target_words: Optional[int] = None,
     chapters: Optional[int] = None,
     max_rewrites: Optional[int] = None,
@@ -98,6 +101,7 @@ def load_settings(
 
     cfg_idea = str(cfg_app.get("idea", "") or "").strip() or AppSettings.idea
     cfg_output_base = str(cfg_app.get("output_base", "") or "").strip() or AppSettings.output_base
+    cfg_stage = str(cfg_app.get("stage", "") or "").strip() or AppSettings.stage
     cfg_llm_mode = str(cfg_app.get("llm_mode", "") or "").strip().lower() or AppSettings.llm_mode
     cfg_debug = bool(cfg_app.get("debug", AppSettings.debug))
 
@@ -108,6 +112,7 @@ def load_settings(
     # 环境变量（非LLM部分）
     env_idea = (os.getenv("IDEA", "") or "").strip()
     env_output_base = (os.getenv("OUTPUT_BASE", "") or "").strip()
+    env_stage = (os.getenv("STAGE", "") or os.getenv("APP_STAGE", "") or "").strip()
     env_llm_mode = (os.getenv("LLM_MODE", "") or "").strip().lower()
     env_debug = (os.getenv("DEBUG", "") or os.getenv("APP_DEBUG", "") or "").strip().lower()
     env_target_words = os.getenv("TARGET_WORDS", "").strip()
@@ -124,6 +129,7 @@ def load_settings(
 
     final_idea = env_idea or cfg_idea
     final_output_base = env_output_base or cfg_output_base
+    final_stage = env_stage or cfg_stage
     final_llm_mode = env_llm_mode or cfg_llm_mode
     final_debug = cfg_debug
     if env_debug in ("1", "true", "yes", "on"):
@@ -139,6 +145,8 @@ def load_settings(
         final_idea = idea.strip()
     if output_base is not None and output_base.strip():
         final_output_base = output_base.strip()
+    if stage is not None and stage.strip():
+        final_stage = stage.strip()
     if target_words is not None:
         final_target_words = int(target_words)
     if chapters is not None:
@@ -185,6 +193,7 @@ def load_settings(
     return AppSettings(
         idea=final_idea,
         output_base=final_output_base,
+        stage=final_stage,
         llm_mode=final_llm_mode,
         debug=final_debug,
         gen=GenerationSettings(

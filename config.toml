@@ -5,6 +5,9 @@ idea = "一个普通人意外进入修仙世界，被迫卷入宗门纷争"
 # 输出根目录
 output_base = "outputs"
 
+# 阶段：用于归档/持久化记录（例如 stage1 / stage2 / stage3）
+stage = "stage1"
+
 # 运行模式：
 # - "template"：强制模板（用于纯工作流验证，不走LLM）
 # - "llm"：强制LLM（未配置LLM时将报错）

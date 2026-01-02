@@ -36,6 +36,13 @@ def write_json(path: str, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def read_json(path: str) -> Optional[Dict[str, Any]]:
+    """
+    读取 JSON（不存在/解析失败返回 None）
+    """
+    return _read_json_if_exists(path)
+
+
 def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
     if not path or not os.path.exists(path):
         return None
@@ -68,6 +75,11 @@ def _unique_path(path: str) -> str:
 
 def rotate_outputs(base_dir: str, new_run_dir: str, keep_last: int = 5) -> str:
     """
+    【已不再推荐在主流程使用】
+    当前主流程采用 make_current_dir() + archive_run()：
+    - outputs/current：仅保留一次尝试（覆盖写入）
+    - outputs/projects/<project>/stages/<stage>/runs/<run_id>/：持久化归档
+
     目标：
     - 将本次输出目录命名为 base_dir/current
     - 仅保留最近 keep_last 次输出（包含 current）
@@ -114,5 +126,121 @@ def rotate_outputs(base_dir: str, new_run_dir: str, keep_last: int = 5) -> str:
         shutil.rmtree(p, ignore_errors=True)
 
     return current_dir
+
+
+def make_current_dir(base_dir: str) -> str:
+    """
+    “尝试目录”：只保留一个 current 目录，每次运行覆盖写入。
+    """
+    os.makedirs(base_dir, exist_ok=True)
+    current_dir = os.path.join(base_dir, "current")
+    if os.path.exists(current_dir):
+        shutil.rmtree(current_dir, ignore_errors=True)
+    os.makedirs(current_dir, exist_ok=True)
+    return current_dir
+
+
+def get_project_dir(base_dir: str, project_name: str) -> str:
+    """
+    “持久化目录”：用于长期记忆（Canon / chapter memory / stage归档）。
+    """
+    projects_root = os.path.join(base_dir, "projects")
+    os.makedirs(projects_root, exist_ok=True)
+    slug = safe_filename(project_name, fallback="story")
+    pdir = os.path.join(projects_root, slug)
+    os.makedirs(pdir, exist_ok=True)
+    return pdir
+
+
+def ensure_canon_files(project_dir: str) -> Dict[str, str]:
+    """
+    初始化 Canon 三件套（+ style），只创建缺失文件，不覆盖已有内容。
+    """
+    canon_dir = os.path.join(project_dir, "canon")
+    os.makedirs(canon_dir, exist_ok=True)
+
+    paths = {
+        "world": os.path.join(canon_dir, "world.json"),
+        "characters": os.path.join(canon_dir, "characters.json"),
+        "timeline": os.path.join(canon_dir, "timeline.json"),
+        "style": os.path.join(canon_dir, "style.md"),
+    }
+
+    if not os.path.exists(paths["world"]):
+        write_json(paths["world"], {"rules": [], "factions": [], "places": [], "notes": ""})
+    if not os.path.exists(paths["characters"]):
+        write_json(paths["characters"], {"characters": []})
+    if not os.path.exists(paths["timeline"]):
+        write_json(paths["timeline"], {"events": []})
+    if not os.path.exists(paths["style"]):
+        write_text(
+            paths["style"],
+            "\n".join(
+                [
+                    "# 文风约束（可编辑）",
+                    "",
+                    "- 叙述视角：第三人称/第一人称（按项目选择）",
+                    "- 节奏：短句为主，关键场景拉长描写",
+                    "- 禁止：AI味总结句、机械重复句式、无意义的套话",
+                    "",
+                    "（你可以把你喜欢的网文片段特征写在这里，后续写作会注入。）",
+                    "",
+                ]
+            ),
+        )
+    return paths
+
+
+def ensure_memory_dirs(project_dir: str) -> Dict[str, str]:
+    """
+    初始化记忆目录：chapter memory / arc summaries（后续阶段用）。
+    """
+    mem_root = os.path.join(project_dir, "memory")
+    chapters_dir = os.path.join(mem_root, "chapters")
+    arcs_dir = os.path.join(mem_root, "arcs")
+    os.makedirs(chapters_dir, exist_ok=True)
+    os.makedirs(arcs_dir, exist_ok=True)
+    return {"memory_root": mem_root, "chapters_dir": chapters_dir, "arcs_dir": arcs_dir}
+
+
+def archive_run(
+    *,
+    base_dir: str,
+    project_dir: str,
+    stage: str,
+    current_dir: str,
+    run_id: Optional[str] = None,
+) -> str:
+    """
+    将本次 current 目录“复制归档”到项目的 stages 目录下：
+    outputs/projects/<project>/stages/<stage>/runs/<run_id>/
+    并更新 stage_index.json
+    """
+    stage_name = safe_filename(stage or "stage1", fallback="stage1")
+    if not run_id:
+        run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    stages_dir = os.path.join(project_dir, "stages", stage_name, "runs")
+    os.makedirs(stages_dir, exist_ok=True)
+    dst = _unique_path(os.path.join(stages_dir, run_id))
+    shutil.copytree(current_dir, dst, dirs_exist_ok=True)
+
+    # stage_index.json：记录每次 run 的元信息（可追溯）
+    index_path = os.path.join(project_dir, "stage_index.json")
+    index = _read_json_if_exists(index_path) or {"stages": {}}
+    stages = index.get("stages") if isinstance(index.get("stages"), dict) else {}
+    items = stages.get(stage_name) if isinstance(stages.get(stage_name), list) else []
+    items.append(
+        {
+            "run_id": os.path.basename(dst),
+            "archived_at": datetime.now().isoformat(timespec="seconds"),
+            "path": os.path.relpath(dst, base_dir).replace("\\", "/"),
+        }
+    )
+    stages[stage_name] = items
+    index["stages"] = stages
+    write_json(index_path, index)
+
+    return dst
 
 

@@ -27,3 +27,7 @@ class StoryState(TypedDict, total=False):
     needs_rewrite: bool
     editor_used_llm: bool
 
+    # 章节记忆（审核通过后生成，用于长期一致性）
+    chapter_memory: Dict[str, Any]
+    memory_used_llm: bool
+
