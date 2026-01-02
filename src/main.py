@@ -6,7 +6,7 @@ import sys
 
 from llm import try_get_chat_llm
 from state import StoryState
-from storage import make_run_dir, write_json, write_text
+from storage import make_run_dir, write_json, write_text, rotate_outputs
 from agents.planner import planner_agent
 from settings import load_settings
 from workflow import build_chapter_app
@@ -37,6 +37,8 @@ def main():
     parser.add_argument("--debug", action="store_true", help="开启debug日志（写入debug.jsonl与call_graph.md）")
     args = parser.parse_args()
 
+    config_abs = os.path.abspath(args.config)
+
     settings = load_settings(
         args.config,
         idea=args.idea,
@@ -64,8 +66,12 @@ def main():
             llm=settings.llm,
         )
     # 建 run 目录（尽早创建，便于记录 planner 等全程日志）
-    os.makedirs(settings.output_base, exist_ok=True)
-    run_dir = make_run_dir(settings.output_base, project_name=str(settings.idea)[:40])
+    # output_base 若为相对路径，则相对 config.toml 所在目录解析（避免从 src/ 运行跑到 src/outputs）
+    output_base = settings.output_base
+    if not os.path.isabs(output_base):
+        output_base = os.path.join(os.path.dirname(config_abs), output_base)
+    os.makedirs(output_base, exist_ok=True)
+    run_dir = make_run_dir(output_base, project_name=str(settings.idea)[:40])
 
     logger = RunLogger(path=os.path.join(run_dir, "debug.jsonl"), enabled=bool(settings.debug))
     logger.event(
@@ -124,6 +130,7 @@ def main():
     write_json(
         os.path.join(run_dir, "run_meta.json"),
         {
+            "run_dir_name": os.path.basename(run_dir),
             "llm_mode": settings.llm_mode,
             "planner_used_llm": bool(planned_state.get("planner_used_llm", False)),
             "target_words": settings.gen.target_words,
@@ -187,7 +194,9 @@ def main():
         write_text(os.path.join(run_dir, "call_graph.md"), "```mermaid\n" + mermaid + "```\n")
 
     logger.event("run_end")
-    print(f"\n输出目录：{run_dir}")
+    # 输出目录管理：将本次目录命名为 current，并仅保留最近 5 次输出（含 current）
+    final_dir = rotate_outputs(output_base, run_dir, keep_last=5)
+    print(f"\n输出目录：{final_dir}")
 
 
 if __name__ == "__main__":
