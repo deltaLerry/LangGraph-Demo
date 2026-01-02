@@ -378,13 +378,24 @@ def apply_canon_suggestions(
 
     stats = {"applied": 0, "skipped": 0, "backups": []}  # type: ignore[dict-item]
 
-    def _confirm(msg: str) -> bool:
-        if yes:
-            return True
-        ans = input(msg).strip().lower()
-        return ans in ("y", "yes", "是", "确认")
+    def _print_help() -> None:
+        print(
+            "\n交互指令：\n"
+            "- y : 应用本条\n"
+            "- s : 跳过本条\n"
+            "- a : 应用全部剩余\n"
+            "- p : 打印本条详细信息（含 canon_patch/value）\n"
+            "- q : 退出（后续条目全部跳过）\n"
+            "- ? : 显示帮助\n"
+        )
+
+    apply_all_remaining = bool(yes)
+    quit_all = False
 
     for idx, it in enumerate(items, start=1):
+        if quit_all:
+            stats["skipped"] += 1
+            continue
         cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
         target = str(cp.get("target", "") or "").strip()
         op = str(cp.get("op", "") or "").strip()
@@ -395,8 +406,41 @@ def apply_canon_suggestions(
             stats["skipped"] += 1
             continue
 
-        # 每条建议逐条确认
-        if not _confirm(f"\n是否应用第{idx}条 Canon 建议？(y/N) "):
+        # 每条建议逐条确认（更人性化：支持 a/y/s/p/q/?）
+        action = "apply" if apply_all_remaining else "ask"
+        if action == "ask":
+            while True:
+                print(f"\n[{idx}/{len(items)}] target={target} op={op} path={path}")
+                ans = input("选择：y(应用) s(跳过) a(全部应用) p(详情) q(退出) ?(帮助) > ").strip().lower()
+                if ans in ("?", "h", "help"):
+                    _print_help()
+                    continue
+                if ans in ("p", "print"):
+                    try:
+                        print(json.dumps(it, ensure_ascii=False, indent=2))
+                    except Exception:
+                        print(str(it))
+                    continue
+                if ans in ("a", "all"):
+                    apply_all_remaining = True
+                    action = "apply"
+                    break
+                if ans in ("q", "quit", "exit"):
+                    quit_all = True
+                    action = "skip"
+                    break
+                if ans in ("s", "skip", "n", "no", ""):
+                    action = "skip"
+                    break
+                if ans in ("y", "yes", "是", "确认"):
+                    action = "apply"
+                    break
+                print("未识别指令，输入 ? 查看帮助。")
+
+        if quit_all:
+            stats["skipped"] += 1
+            continue
+        if action == "skip":
             stats["skipped"] += 1
             continue
 

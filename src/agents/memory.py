@@ -8,23 +8,11 @@ from state import StoryState
 from debug_log import truncate_text
 from llm_meta import extract_finish_reason_and_usage
 from storage import load_canon_bundle
+from json_utils import extract_first_json_object
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
-    try:
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        pass
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        return {}
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {}
+    return extract_first_json_object(text)
 
 
 def memory_agent(state: StoryState) -> StoryState:

@@ -7,21 +7,14 @@ from typing import Any, Dict, Optional, List
 from state import StoryState
 from debug_log import truncate_text
 from llm_meta import extract_finish_reason_and_usage
+from json_utils import extract_first_json_object
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
-    # 先尝试直接解析
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    # 再尝试抽取第一个 { ... } 片段
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
+    obj = extract_first_json_object(text)
+    if not obj:
         raise ValueError("planner_agent: 无法从 LLM 输出中提取 JSON")
-    return json.loads(m.group(0))
+    return obj
 
 
 def planner_agent(state: StoryState) -> StoryState:

@@ -191,9 +191,6 @@ def main():
         if not items:
             print("\n（没有可应用的 canon_suggestions）")
             return
-        if not _confirm("\n确认应用以上 Canon 建议到项目 Canon？(y/N) "):
-            print("已取消（未应用）。")
-            return
         stats = apply_canon_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
         print(f"\n已处理 Canon 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
         if stats.get("backups"):
@@ -438,15 +435,12 @@ def main():
         print("\n=== Canon Suggestions Preview ===")
         print(preview_canon_suggestions(items))
         if items:
-            if _confirm("\n确认应用以上 Canon 建议到项目 Canon？(y/N) "):
-                stats = apply_canon_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
-                print(f"已处理 Canon 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
-                if stats.get("backups"):
-                    print("已生成备份：")
-                    for b in stats["backups"]:
-                        print(f"- {b}")
-            else:
-                print("已跳过应用 Canon 建议（未修改 canon）。")
+            stats = apply_canon_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
+            print(f"已处理 Canon 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
+            if stats.get("backups"):
+                print("已生成备份：")
+                for b in stats["backups"]:
+                    print(f"- {b}")
         else:
             print("（没有可应用的 canon_suggestions）")
 

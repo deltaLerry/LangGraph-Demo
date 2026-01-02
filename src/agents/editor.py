@@ -8,30 +8,11 @@ from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
 from llm_meta import extract_finish_reason_and_usage
+from json_utils import extract_first_json_object
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
-    """
-    兼容 LLM 输出带 ```json ... ``` 或前后缀的情况。
-    """
-    s = (text or "").strip()
-    if not s:
-        return {}
-    # 先尝试直接解析
-    try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        pass
-    # 再抽取第一个 { ... }
-    m = re.search(r"\{[\s\S]*\}", s)
-    if not m:
-        return {}
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {}
+    return extract_first_json_object(text)
 
 
 def _format_issue_to_text(issue: Dict[str, Any]) -> str:

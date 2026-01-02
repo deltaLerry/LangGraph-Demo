@@ -10,6 +10,7 @@ import os
 
 from storage import load_canon_bundle, read_json, write_json, write_text
 from llm_meta import extract_finish_reason_and_usage
+from json_utils import extract_first_json_object
 
 
 def _is_placeholder_world(world: Dict[str, Any]) -> bool:
@@ -50,25 +51,7 @@ def _merge_keep_existing(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
-    """
-    兼容 LLM 输出带 ```json ... ``` / 多余前后缀的情况。
-    """
-    s = (text or "").strip()
-    if not s:
-        return {}
-    try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        pass
-    m = re.search(r"\{[\s\S]*\}", s)
-    if not m:
-        return {}
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {}
+    return extract_first_json_object(text)
 
 
 def canon_init_agent(state: StoryState) -> StoryState:

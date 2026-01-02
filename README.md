@@ -190,6 +190,8 @@ python src\main.py --llm-mode template
 python src\main.py --apply-canon-only
 ```
 
+- 交互按键（更快）：`y=应用本条 / s=跳过 / a=全部应用 / p=详情 / q=退出 / ?=帮助`
+
 - 运行结束后自动进入“预览→确认→应用”的交互流程（推荐）：
 
 ```bash
