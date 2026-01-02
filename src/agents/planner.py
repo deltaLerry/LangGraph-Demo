@@ -1,44 +1,38 @@
-from models.planner_models import PlannerResult, Task
+from state import StoryState
 
-
-class PlannerAgent:
+def planner_agent(state: StoryState) -> StoryState:
     """
-    策划 Agent（玲珑）
-    当前为规则 / 模板版本，不接 LLM
+    策划 Agent（模板版，不接 LLM）
+    输出 dict，兼容 Writer Agent
     """
+    idea = state.get("user_input", "默认点子")
 
-    def plan(self, idea: str) -> PlannerResult:
-        project_name = self._generate_project_name(idea)
+    # 构建 Planner 输出
+    state["planner_result"] = {
+        "项目名称": f"《{idea.strip()}》",
+        "任务列表": [
+            {
+                "任务名称": "世界观设定",
+                "执行者": "架构师",
+                "任务指令": "请基于核心点子，构建故事发生的世界背景、基本规则与核心冲突。"
+            },
+            {
+                "任务名称": "核心角色",
+                "执行者": "角色导演",
+                "任务指令": "请设计主要角色的人物卡，包括性格、动机、背景与成长方向。"
+            },
+            {
+                "任务名称": "主线脉络",
+                "执行者": "编剧",
+                "任务指令": "请规划故事的整体主线发展，以及前期的关键剧情节点。"
+            },
+            {
+                "任务名称": "开篇基调",
+                "执行者": "策划",
+                "任务指令": "请确定小说的整体开篇风格与情绪基调，例如轻松、热血或悬疑。"
+            },
+        ],
+    }
 
-        tasks = [
-            Task(
-                task_name="世界观设定",
-                executor="架构师",
-                instruction="请基于核心点子，构建故事发生的世界背景、基本规则与核心冲突。"
-            ),
-            Task(
-                task_name="核心角色",
-                executor="角色导演",
-                instruction="请设计主要角色的人物卡，包括性格、动机、背景与成长方向。"
-            ),
-            Task(
-                task_name="主线脉络",
-                executor="编剧",
-                instruction="请规划故事的整体主线发展，以及前期的关键剧情节点。"
-            ),
-            Task(
-                task_name="开篇基调",
-                executor="策划",
-                instruction="请确定小说的整体开篇风格与情绪基调，例如轻松、热血或悬疑。"
-            ),
-        ]
-
-        return PlannerResult(
-            project_name=project_name,
-            tasks=tasks
-        )
-
-    def _generate_project_name(self, idea: str) -> str:
-        # MVP 阶段：简单规则，后面交给 LLM
-        return f"《{idea.strip()}》"
+    return state
 
