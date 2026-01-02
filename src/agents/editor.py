@@ -64,8 +64,17 @@ def editor_agent(state: StoryState) -> StoryState:
                 "- 通过：只输出“审核通过”四个字\n"
                 "- 不通过：第一行输出“审核不通过”，并另起一段用清单列出具体修改意见\n"
                 "要求：修改意见必须极其具体、可执行。\n"
-                "一致性要求：必须对照 Canon 设定（世界观/人物卡/时间线/文风）与最近章节记忆，指出矛盾点。\n"
-                "如果不通过：每条建议尽量包含【冲突依据】+【正文定位（引用原句/段）】+【改法】。"
+                "一致性优先级：\n"
+                "1) 先对照 Canon 设定（world/characters/timeline/style），这是“真值来源”\n"
+                "2) 再对照最近章节记忆（用于情节连续性）\n"
+                "3) planner 任务仅作参考（不可覆盖 Canon）\n"
+                "如果不通过：每条修改意见必须使用下面模板（请直接写在同一条 bullet 里）：\n"
+                "- 【类型】world|character|timeline|style|logic|readability\n"
+                "  【CanonKey】（若是设定冲突必填，例如 characters.characters[0].taboos 或 world.rules[2].name；非设定冲突可写 N/A）\n"
+                "  【引用】从正文中直接复制 1 句或 1 段原文（必须原样引用）\n"
+                "  【问题】简明指出矛盾/不一致/问题点\n"
+                "  【改法】给出可执行改写方案（尽量具体到怎么改一句/哪段增删）\n"
+                "注意：如果找不到引用原文，请不要输出该条（宁可少而准）。"
             )
         )
         human = HumanMessage(

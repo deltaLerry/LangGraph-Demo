@@ -271,6 +271,34 @@ def build_recent_memory_synopsis(memories: List[Dict[str, Any]]) -> str:
     return "\n".join(lines).strip() or "（无）"
 
 
+def get_max_chapter_memory_index(project_dir: str) -> int:
+    """
+    从 projects/<project>/memory/chapters/*.memory.json 推断已有最大章号。
+    返回 0 表示未找到。
+    """
+    mem_dir = os.path.join(project_dir, "memory", "chapters")
+    if not os.path.exists(mem_dir):
+        return 0
+    max_idx = 0
+    try:
+        for name in os.listdir(mem_dir):
+            if not name.endswith(".memory.json"):
+                continue
+            # 支持 001.memory.json / 101.memory.json
+            m = re.match(r"^(\d+)\.memory\.json$", name)
+            if not m:
+                continue
+            try:
+                idx = int(m.group(1))
+            except ValueError:
+                continue
+            if idx > max_idx:
+                max_idx = idx
+    except Exception:
+        return 0
+    return max_idx
+
+
 def archive_run(
     *,
     base_dir: str,

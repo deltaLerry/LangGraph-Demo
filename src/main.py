@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -12,6 +13,7 @@ from storage import (
     ensure_canon_files,
     ensure_memory_dirs,
     get_project_dir,
+    get_max_chapter_memory_index,
     make_current_dir,
     read_json,
     write_json,
@@ -46,6 +48,9 @@ def main():
     parser.add_argument("--output-base", type=str, default="", help="输出根目录（覆盖配置）")
     parser.add_argument("--stage", type=str, default="", help="阶段名（用于归档，覆盖配置）")
     parser.add_argument("--memory-recent-k", type=int, default=None, help="注入最近章节记忆数量（只注入梗概）")
+    parser.add_argument("--project", type=str, default="", help="项目名（用于续写/固定 projects/<project>；建议与现有目录名一致）")
+    parser.add_argument("--resume", action="store_true", help="续写模式：优先复用 projects/<project>/project_meta.json，并自动从下一章开始")
+    parser.add_argument("--start-chapter", type=int, default=None, help="起始章节号（例如 101）。不填则 resume 模式自动推断为已有最大章+1")
     parser.add_argument("--archive", action="store_true", help="运行结束后自动归档（默认不归档，便于先review）")
     parser.add_argument(
         "--archive-only",
@@ -159,7 +164,13 @@ def main():
         # 让异常继续向上抛出，但日志已记录 span_error
         raise
 
-    # 初始化 state（先跑策划一次）
+    # === 解析项目目录（修复：此前这里 project_dir 可能未定义） ===
+    project_name_hint = args.project.strip() or (settings.idea or "story")
+    project_dir = get_project_dir(output_base, project_name_hint)
+    ensure_canon_files(project_dir)
+    mem_dirs = ensure_memory_dirs(project_dir)
+
+    # 初始化 state（先跑策划一次 / 或 resume 复用）
     base_state: StoryState = {
         "user_input": settings.idea,
         "target_words": int(settings.gen.target_words),
@@ -177,20 +188,53 @@ def main():
         "memory_recent_k": int(settings.memory_recent_k),
     }
 
-    planned_state = planner_agent(base_state)
+    # planner：续写时优先复用 project_meta.json，避免每次重规划
+    project_meta_path = os.path.join(project_dir, "project_meta.json")
+    planned_state: StoryState
+    if args.resume:
+        meta = read_json(project_meta_path) or {}
+        meta_planner = meta.get("planner_result") if isinstance(meta.get("planner_result"), dict) else None
+        meta_name = str(meta.get("project_name") or "").strip()
+        if meta_planner:
+            planned_state = {**base_state}
+            planned_state["planner_result"] = meta_planner
+            planned_state["planner_json"] = json.dumps(meta_planner, ensure_ascii=False, indent=2)
+            planned_state["planner_used_llm"] = bool(meta.get("planner_used_llm", False))
+            logger.event("planner_resume", project_name=meta_name)
+        else:
+            planned_state = planner_agent(base_state)
+    else:
+        planned_state = planner_agent(base_state)
+
     planner_result = planned_state.get("planner_result", {})
     planner_json = planned_state.get("planner_json", "")
     project_name = planner_result.get("项目名称") if isinstance(planner_result, dict) else None
-    project_name_final = str(project_name or settings.idea or "story")
-    project_dir = get_project_dir(output_base, project_name_final)
-    ensure_canon_files(project_dir)
-    mem_dirs = ensure_memory_dirs(project_dir)
+
+    # 如果未显式指定 --project，则使用 planner 的项目名作为持久化目录
+    if not args.project.strip():
+        project_name_final = str(project_name or settings.idea or "story")
+        project_dir = get_project_dir(output_base, project_name_final)
+        ensure_canon_files(project_dir)
+        mem_dirs = ensure_memory_dirs(project_dir)
+        planned_state["project_dir"] = project_dir
 
     # 阶段2.2：初始化 Canon（仅在占位时写入，避免覆盖人工维护）
     planned_state["project_dir"] = project_dir
     planned_state["stage"] = settings.stage
     planned_state["memory_recent_k"] = int(settings.memory_recent_k)
     planned_state = canon_init_agent(planned_state)
+
+    # 持久化项目元信息（用于 resume）
+    write_json(
+        os.path.join(project_dir, "project_meta.json"),
+        {
+            "project_name": str(project_name or args.project.strip() or project_name_hint),
+            "idea": str(settings.idea or ""),
+            "planner_result": planner_result if isinstance(planner_result, dict) else {},
+            "planner_used_llm": bool(planned_state.get("planner_used_llm", False)),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
     # 记录真实项目名（不改目录名，仅写入元数据/日志）
     logger.event("project_name", project_name=str(project_name or ""))
 
@@ -219,7 +263,16 @@ def main():
     os.makedirs(chapters_dir_current, exist_ok=True)
 
     # 多章节：每章执行 写手->主编（可返工）
-    for idx in range(1, int(settings.gen.chapters) + 1):
+    start_chapter = int(args.start_chapter) if args.start_chapter is not None else None
+    if start_chapter is None and args.resume:
+        start_chapter = get_max_chapter_memory_index(project_dir) + 1
+    if start_chapter is None:
+        start_chapter = 1
+    start_chapter = max(1, int(start_chapter))
+    end_chapter = start_chapter + int(settings.gen.chapters) - 1
+    planned_state["chapters_total"] = int(end_chapter)
+
+    for idx in range(start_chapter, end_chapter + 1):
         chapter_state: StoryState = {
             **planned_state,
             "chapter_index": idx,
@@ -269,7 +322,7 @@ def main():
     print("=== Planner Result ===")
     print(planner_json or planner_result)
 
-    for idx in range(1, int(settings.gen.chapters) + 1):
+    for idx in range(start_chapter, end_chapter + 1):
         # 只输出每章标题提示；正文/意见请看 outputs 落盘文件
         print(f"\n=== Chapter {idx} ===")
         chap_id = f"{idx:03d}"
