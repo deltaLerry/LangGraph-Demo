@@ -141,6 +141,7 @@ python src\main.py --config config.toml
 
 ### 常用 CLI 参数
 
+- `--idea-file path/to/idea.txt`：从文件读取用户点子（UTF-8），优先级最高（覆盖 `--idea/config/env`）
 - `--stage stage1`：归档阶段名（用于 `stages/<stage>/...`）
 - `--memory-recent-k 3`：注入最近章节“梗概记忆”的数量（只注入 summary）
 - `--archive`：运行结束后自动归档（默认不归档，建议先 review）

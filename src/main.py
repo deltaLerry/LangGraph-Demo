@@ -42,6 +42,7 @@ def main():
     parser = argparse.ArgumentParser(description="LangGraph 小说MVP：策划一次 -> 多章节写作/审核（可返工）")
     parser.add_argument("--config", type=str, default="config.toml", help="配置文件路径（TOML，可选）")
     parser.add_argument("--idea", type=str, default="", help="用户点子（覆盖配置；留空则使用配置/默认值）")
+    parser.add_argument("--idea-file", type=str, default="", help="从文件读取用户点子（UTF-8）。优先级最高，覆盖 --idea/config/env")
     parser.add_argument("--target-words", type=int, default=None, help="每章目标字数（覆盖配置）")
     parser.add_argument("--chapters", type=int, default=None, help="章节数（覆盖配置）")
     parser.add_argument("--max-rewrites", type=int, default=None, help="每章最多返工次数（覆盖配置）")
@@ -63,9 +64,23 @@ def main():
 
     config_abs = os.path.abspath(args.config)
 
+    # idea 支持从文件读取（优先级最高）
+    idea_from_file: str | None = None
+    if args.idea_file and args.idea_file.strip():
+        idea_path = args.idea_file.strip()
+        if not os.path.isabs(idea_path):
+            idea_path = os.path.join(os.path.dirname(config_abs), idea_path)
+        if not os.path.exists(idea_path):
+            raise FileNotFoundError(f"未找到 idea 文件：{idea_path}")
+        # 支持 UTF-8 BOM
+        with open(idea_path, "r", encoding="utf-8-sig") as f:
+            idea_from_file = f.read().strip()
+        if not idea_from_file:
+            raise ValueError(f"idea 文件内容为空：{idea_path}")
+
     settings = load_settings(
         args.config,
-        idea=args.idea,
+        idea=idea_from_file if idea_from_file is not None else args.idea,
         output_base=args.output_base,
         stage=args.stage,
         memory_recent_k=args.memory_recent_k,
