@@ -18,6 +18,7 @@ from storage import (
     write_text,
 )
 from agents.planner import planner_agent
+from agents.canon_init import canon_init_agent
 from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
@@ -184,6 +185,12 @@ def main():
     project_dir = get_project_dir(output_base, project_name_final)
     ensure_canon_files(project_dir)
     mem_dirs = ensure_memory_dirs(project_dir)
+
+    # 阶段2.2：初始化 Canon（仅在占位时写入，避免覆盖人工维护）
+    planned_state["project_dir"] = project_dir
+    planned_state["stage"] = settings.stage
+    planned_state["memory_recent_k"] = int(settings.memory_recent_k)
+    planned_state = canon_init_agent(planned_state)
     # 记录真实项目名（不改目录名，仅写入元数据/日志）
     logger.event("project_name", project_name=str(project_name or ""))
 
@@ -227,7 +234,6 @@ def main():
             "project_dir": project_dir,
             "stage": settings.stage,
             "memory_recent_k": int(settings.memory_recent_k),
-            "editor_conflicts": [],
         }
         logger.event("chapter_start", chapter_index=idx)
         final_state = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
@@ -246,15 +252,11 @@ def main():
         write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), final_state.get("writer_result", ""))
         decision = final_state.get("editor_decision", "")
         feedback = final_state.get("editor_feedback", [])
-        conflicts = final_state.get("editor_conflicts", []) or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
             lines = ["审核不通过", "", *[f"- {x}" for x in feedback]]
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
-        # 结构化 conflicts：单独落盘，便于统计/自动化（归档时会随 current 一起复制）
-        if isinstance(conflicts, list) and conflicts:
-            write_json(os.path.join(chapters_dir_current, f"{chap_id}.conflicts.json"), {"conflicts": conflicts})
 
         # chapter memory：写入 current + 持久化 projects
         mem = final_state.get("chapter_memory") or {}
