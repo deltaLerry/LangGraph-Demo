@@ -77,6 +77,55 @@ def writer_agent(state: StoryState) -> StoryState:
         style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
+        # === 2.1.1：会议同步摘要（把“主编验收清单/硬约束”同步给写手，提升一次过） ===
+        def _canon_names() -> str:
+            try:
+                names: list[str] = []
+                w = canon.get("world") if isinstance(canon.get("world"), dict) else {}
+                c = canon.get("characters") if isinstance(canon.get("characters"), dict) else {}
+                t = canon.get("timeline") if isinstance(canon.get("timeline"), dict) else {}
+                for k in ("rules", "factions", "places"):
+                    arr = w.get(k) if isinstance(w.get(k), list) else []
+                    for it in arr:
+                        if isinstance(it, dict) and str(it.get("name", "") or "").strip():
+                            names.append(str(it.get("name")).strip())
+                arrc = c.get("characters") if isinstance(c.get("characters"), list) else []
+                for it in arrc:
+                    if isinstance(it, dict) and str(it.get("name", "") or "").strip():
+                        names.append(str(it.get("name")).strip())
+                arre = t.get("events") if isinstance(t.get("events"), list) else []
+                for it in arre:
+                    if isinstance(it, dict):
+                        for key in ("event", "name"):
+                            if str(it.get(key, "") or "").strip():
+                                names.append(str(it.get(key)).strip())
+                                break
+                # 去重保持顺序
+                seen: set[str] = set()
+                uniq: list[str] = []
+                for n in names:
+                    if n in seen:
+                        continue
+                    seen.add(n)
+                    uniq.append(n)
+                if not uniq:
+                    return "（Canon 里暂无明确的专有名词清单；请尽量避免新增硬设定名词）"
+                s = "、".join(uniq[:60])
+                return s if len(uniq) <= 60 else s + "…"
+            except Exception:
+                return "（无法提取 Canon 名词；请尽量避免新增硬设定名词）"
+
+        sync_digest = (
+            "【会议同步（写前对齐）｜主编验收清单】\n"
+            "- 字数：严格控制在区间内；接近上限要主动收束并结尾。\n"
+            "- 设定：只使用 Canon 中已出现的专有名词/势力/地点/能力名；如必须引入新概念，用模糊描述，不要起新名字。\n"
+            "- 一致性：人物动机/能力/时间线不要前后打架；不要出现‘上一段说A，下一段又说非A’。\n"
+            "- 信息揭露：避免大段设定说明（百科式讲解）；设定通过行动/冲突/对话自然露出。\n"
+            "- 风格：遵守 style.md；避免 AI 总结句、机械重复。\n"
+            "\n【Canon 已知专有名词（尽量只用这些）】\n"
+            f"{_canon_names()}\n"
+        )
+
         if is_rewrite:
             system = SystemMessage(
                 content=(
@@ -84,6 +133,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "要求：逻辑自洽、避免AI腔、句式多样、节奏紧凑。\n"
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要额外说明。"
                 )
@@ -94,6 +144,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"章节：第{chapter_index}章 / 共{chapters_total}章\n"
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
+                    f"{sync_digest}\n"
                     "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
@@ -113,6 +164,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "要求：中文；自然流畅；有冲突与钩子；避免AI感。\n"
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要标题以外的任何说明。"
                 )
@@ -123,6 +175,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"章节：第{chapter_index}章 / 共{chapters_total}章\n"
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
+                    f"{sync_digest}\n"
                     "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
@@ -232,17 +285,68 @@ def writer_agent(state: StoryState) -> StoryState:
                     break
             state["writer_result"] = cur
 
-        # 2) 超长：不做自动压缩（按产品偏好避免二次改写带来的风格漂移）
-        if _need_shorten(state["writer_result"]) and logger:
-            logger.event(
-                "writer_length_warning",
-                chapter_index=chapter_index,
-                writer_version=writer_version,
-                target_chars=target,
-                min_chars=min_chars,
-                max_chars=max_chars,
-                actual_chars=len(state.get("writer_result", "") or ""),
+        # 2) 超长：自动做一次“缩稿到上限内”，显著提升主编一次通过率
+        if _need_shorten(state["writer_result"]):
+            if logger:
+                logger.event(
+                    "writer_length_warning",
+                    chapter_index=chapter_index,
+                    writer_version=writer_version,
+                    target_chars=target,
+                    min_chars=min_chars,
+                    max_chars=max_chars,
+                    actual_chars=len(state.get("writer_result", "") or ""),
+                )
+            # 只做一次缩稿，避免反复打磨带来风格漂移
+            cur = state["writer_result"]
+            system3 = SystemMessage(
+                content=(
+                    "你是专业网文写手兼资深改稿编辑。请将给定正文压缩到指定字数上限内。\n"
+                    "要求：\n"
+                    "- 不改变事件顺序与关键信息（人物动机/因果链/关键伏笔必须保留）\n"
+                    "- 不新增任何设定名词与情节\n"
+                    "- 语言更凝练，删掉重复描写、过长比喻、无推进作用的段落\n"
+                    f"- 输出必须 <= {max_chars} 字（中文字符数近似，包含标点与空白）\n"
+                    "只输出压缩后的正文，不要解释。\n"
+                )
             )
+            human3 = HumanMessage(
+                content=(
+                    f"项目：{project_name}\n"
+                    f"章节：第{chapter_index}章 / 共{chapters_total}章\n"
+                    f"当前长度：{len(cur)}\n"
+                    f"目标上限：{max_chars}\n\n"
+                    "原文：\n"
+                    f"{cur}\n"
+                )
+            )
+            if logger:
+                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                with logger.llm_call(
+                    node="writer_shorten",
+                    chapter_index=chapter_index,
+                    messages=[system3, human3],
+                    model=model,
+                    base_url=str(getattr(llm, "base_url", "") or ""),
+                    extra={"writer_version": writer_version},
+                ):
+                    resp3 = llm.invoke([system3, human3])
+            else:
+                resp3 = llm.invoke([system3, human3])
+            shrunk = (getattr(resp3, "content", "") or "").strip()
+            fr3, usage3 = extract_finish_reason_and_usage(resp3)
+            if shrunk:
+                state["writer_result"] = shrunk
+            if logger:
+                logger.event(
+                    "llm_response",
+                    node="writer_shorten",
+                    chapter_index=chapter_index,
+                    writer_version=writer_version,
+                    content=truncate_text(state.get("writer_result", ""), max_chars=getattr(logger, "max_chars", 20000)),
+                    finish_reason=fr3,
+                    token_usage=usage3,
+                )
 
         state["writer_used_llm"] = True
         if logger:

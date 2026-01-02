@@ -7,7 +7,7 @@ from state import StoryState
 
 def canon_update_agent(state: StoryState) -> StoryState:
     """
-    阶段2：Canon 增量更新（从“审核通过后的 chapter memory”提炼为补丁建议）。
+    阶段2：Canon 增量更新（从“chapter memory”提炼为补丁建议）。
 
     最新设计原则（更安全、更可控）：
     - 本节点**不直接写 Canon**，只生成 `canon_update_suggestions`（补丁建议）
@@ -18,12 +18,8 @@ def canon_update_agent(state: StoryState) -> StoryState:
     if logger:
         logger.event("node_start", node="canon_update", chapter_index=chapter_index)
 
-    if str(state.get("editor_decision", "") or "") != "审核通过":
-        state["canon_update_used"] = False
-        state["canon_update_suggestions"] = []
-        if logger:
-            logger.event("node_end", node="canon_update", chapter_index=chapter_index, skipped=True, reason="editor_not_pass")
-        return state
+    # 注意：canon_update_suggestions 是“建议层”，不直接修改 Canon；
+    # 为了保持落盘章节的一致性（即使审核不通过/达到返工上限），此处不再以 editor_decision 作为门控条件。
 
     project_dir = str(state.get("project_dir", "") or "")
     if not project_dir:
@@ -43,6 +39,8 @@ def canon_update_agent(state: StoryState) -> StoryState:
 
     # 生成建议（统一复用 apply_canon_suggestions 支持的最保守 op：note / append）
     suggestions: List[Dict[str, Any]] = []
+    editor_decision = str(state.get("editor_decision", "") or "").strip()
+    approved = editor_decision == "审核通过"
 
     # 1) new_facts：写入 world.json notes（最安全，避免 schema/定位复杂）
     new_facts = mem.get("new_facts") if isinstance(mem.get("new_facts"), list) else []
@@ -59,6 +57,8 @@ def canon_update_agent(state: StoryState) -> StoryState:
             {
                 "source": "memory",
                 "chapter_index": chapter_index,
+                "editor_decision": editor_decision,
+                "approved": approved,
                 "action": "canon_patch",
                 "issue": f"沉淀 chapter memory 的 new_facts 到 Canon（{t}）",
                 "quote": "",
@@ -84,6 +84,8 @@ def canon_update_agent(state: StoryState) -> StoryState:
             {
                 "source": "memory",
                 "chapter_index": chapter_index,
+                "editor_decision": editor_decision,
+                "approved": approved,
                 "action": "canon_patch",
                 "issue": "沉淀角色状态变更到 Canon（先记 notes，后续可再结构化进人物卡）",
                 "quote": "",
@@ -101,6 +103,8 @@ def canon_update_agent(state: StoryState) -> StoryState:
             {
                 "source": "memory",
                 "chapter_index": chapter_index,
+                "editor_decision": editor_decision,
+                "approved": approved,
                 "action": "canon_patch",
                 "issue": "沉淀文风要点到 style.md",
                 "quote": "",

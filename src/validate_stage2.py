@@ -123,16 +123,12 @@ def _check_chapters(errors: List[str], current_dir: str) -> None:
         if decision not in ("审核通过", "审核不通过"):
             _fail(errors, f"chapters/{cid}.editor.json decision 非法：{decision}")
 
-        # memory：仅通过时必须存在
-        if decision == "审核通过":
-            if _must_exists(errors, mem_json, f"chapters/{cid}.memory.json（通过时必须存在）"):
-                mem = _read_json_dict(errors, mem_json, f"chapters/{cid}.memory.json")
-                if isinstance(mem, dict):
-                    if "summary" not in mem:
-                        _fail(errors, f"chapters/{cid}.memory.json 缺少 summary")
-        else:
-            if os.path.exists(mem_json):
-                _fail(errors, f"chapters/{cid}.memory.json 不应存在（审核不通过时）")
+        # memory：只要章节落盘，就必须存在（即使审核不通过/达到返工上限）
+        if _must_exists(errors, mem_json, f"chapters/{cid}.memory.json（每章都必须存在）"):
+            mem = _read_json_dict(errors, mem_json, f"chapters/{cid}.memory.json")
+            if isinstance(mem, dict):
+                if "summary" not in mem:
+                    _fail(errors, f"chapters/{cid}.memory.json 缺少 summary")
 
         # suggestions：可选，但若存在必须结构合法且 patch 可应用
         for sug_name in (f"{cid}.canon_suggestions.json", f"{cid}.canon_update_suggestions.json"):

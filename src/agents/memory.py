@@ -18,7 +18,8 @@ def _extract_first_json_obj(text: str) -> Dict[str, Any]:
 def memory_agent(state: StoryState) -> StoryState:
     """
     章节记忆 Agent（chapter memory）：
-    - 仅在 editor 审核通过后触发
+    - 只要本章产出落盘（writer_result 已有），就生成 chapter memory
+    - 即使审核不通过 / 达到返工上限，也会生成（便于后续续写连续性与调试）
     - 有 LLM：抽取结构化 memory.json（摘要/事件/人物状态/新增事实/伏笔）
     - 无 LLM：给一个可用的模板结构（保证落盘/后续可检索）
     """
@@ -27,14 +28,8 @@ def memory_agent(state: StoryState) -> StoryState:
     if logger:
         logger.event("node_start", node="memory", chapter_index=chapter_index)
 
-    decision = str(state.get("editor_decision", "") or "")
-    if decision != "审核通过":
-        # 安全：不通过不生成
-        state["chapter_memory"] = {}
-        state["memory_used_llm"] = False
-        if logger:
-            logger.event("node_end", node="memory", chapter_index=chapter_index, used_llm=False, skipped=True)
-        return state
+    decision = str(state.get("editor_decision", "") or "").strip()
+    approved = decision == "审核通过"
 
     planner_result = state.get("planner_result") or {}
     writer_result = str(state.get("writer_result", "") or "")
@@ -102,6 +97,9 @@ def memory_agent(state: StoryState) -> StoryState:
             )
         mem = _extract_first_json_obj(text)
         mem["chapter_index"] = chapter_index
+        # 额外元信息（非 LLM 生成字段）：用于后续区分“通过/不通过”的记忆来源
+        mem["editor_decision"] = decision
+        mem["approved"] = approved
         state["chapter_memory"] = mem
         state["memory_used_llm"] = True
         if logger:
@@ -134,6 +132,8 @@ def memory_agent(state: StoryState) -> StoryState:
         people = ["主角"]
     mem = {
         "chapter_index": chapter_index,
+        "editor_decision": decision,
+        "approved": approved,
         "summary": (writer_result[:180] + "…") if len(writer_result) > 180 else writer_result,
         "events": [
             {

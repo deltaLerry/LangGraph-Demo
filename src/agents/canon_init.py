@@ -136,33 +136,113 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 "注意：这是第一版设定，后续会由架构师/角色导演持续维护。请给出稳健、可扩展的基础设定。"
             )
         )
-        if logger:
-            model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-            with logger.llm_call(
-                node="canon_init",
-                chapter_index=chapter_index,
-                messages=[system, human],
-                model=model,
-                base_url=str(getattr(llm, "base_url", "") or ""),
-            ):
-                resp = llm.invoke([system, human])
-        else:
-            resp = llm.invoke([system, human])
-        text = (getattr(resp, "content", "") or "").strip()
-        if logger:
-            logger.event(
-                "llm_response",
-                node="canon_init",
-                chapter_index=chapter_index,
-                content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=extract_finish_reason_and_usage(resp)[0],
-                token_usage=extract_finish_reason_and_usage(resp)[1],
-            )
+        def _invoke_once(node_name: str, system_msg: SystemMessage, human_msg: HumanMessage) -> tuple[str, str | None]:
+            if logger:
+                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                with logger.llm_call(
+                    node=node_name,
+                    chapter_index=chapter_index,
+                    messages=[system_msg, human_msg],
+                    model=model,
+                    base_url=str(getattr(llm, "base_url", "") or ""),
+                ):
+                    resp0 = llm.invoke([system_msg, human_msg])
+            else:
+                resp0 = llm.invoke([system_msg, human_msg])
+            text0 = (getattr(resp0, "content", "") or "").strip()
+            fr0, usage0 = extract_finish_reason_and_usage(resp0)
+            if logger:
+                logger.event(
+                    "llm_response",
+                    node=node_name,
+                    chapter_index=chapter_index,
+                    content=truncate_text(text0, max_chars=getattr(logger, "max_chars", 20000)),
+                    finish_reason=fr0,
+                    token_usage=usage0,
+                )
+            return text0, fr0
+
+        # 第一次尝试
+        text, fr = _invoke_once("canon_init", system, human)
         obj = _extract_first_json_obj(text)
+
+        # 如果被截断 / 解析失败：做一次更短、更保守的重试，避免 writer/editor 拿到空 Canon 导致通过率极低
+        if (not obj) or (fr and str(fr).lower() == "length"):
+            system_retry = SystemMessage(
+                content=(
+                    "你是小说项目的“设定初始化器”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
+                    "务必短：控制总条目数与字段长度，确保 JSON 完整可解析。\n"
+                    "硬性约束：\n"
+                    "- world.rules 6条以内\n"
+                    "- world.factions 3条以内\n"
+                    "- world.places 3条以内\n"
+                    "- characters.characters 3个角色以内\n"
+                    "- timeline.events 6条以内\n"
+                    "- 每个 detail 不超过 120 字\n"
+                    "- style_suggestions 不超过 180 字\n"
+                    "输出 JSON schema 与上一次相同。\n"
+                )
+            )
+            text2, _fr2 = _invoke_once("canon_init_retry", system_retry, human)
+            obj2 = _extract_first_json_obj(text2)
+            if obj2:
+                obj = obj2
         new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}
         new_chars = obj.get("characters") if isinstance(obj.get("characters"), dict) else {}
         new_timeline = obj.get("timeline") if isinstance(obj.get("timeline"), dict) else {}
         style_suggestions = str(obj.get("style_suggestions", "") or "")
+
+        # 若两次仍失败：立刻写入“最小可用模板”，避免 writer/editor 拿到空 Canon 导致通过率极低
+        if not (new_world or new_chars or new_timeline or style_suggestions.strip()):
+            if need_world:
+                write_json(
+                    world_path,
+                    {
+                        "rules": [{"name": "修行体系", "detail": "世界存在修行体系，但细节待补充；不同宗门/势力有不同法门。"}],
+                        "factions": [{"name": "宗门A", "detail": "本地强势宗门，内部派系斗争激烈。"}],
+                        "places": [{"name": "山门", "detail": "故事开篇发生地，规矩森严。"}],
+                        "notes": "（模板）后续由架构师完善世界观规则/禁忌/体系。",
+                    },
+                )
+            if need_chars:
+                write_json(
+                    characters_path,
+                    {
+                        "characters": [
+                            {
+                                "name": "主角",
+                                "role": "外来者/新入门者",
+                                "personality": "谨慎、好奇、有底线",
+                                "motivation": "求生与自证",
+                                "abilities": "未知（待觉醒）",
+                                "taboos": "不要轻易暴露秘密",
+                                "relationships": [],
+                            }
+                        ]
+                    },
+                )
+            if need_timeline:
+                write_json(
+                    timeline_path,
+                    {"events": [{"order": 1, "when": "开篇", "what": "主角误入修仙世界并被宗门注意", "impact": "被迫卷入宗门纷争"}]},
+                )
+            if need_style:
+                write_text(style_path, "偏网文节奏：冲突前置，短句，多画面感，少空泛总结。\n")
+
+            if logger:
+                logger.event(
+                    "node_end",
+                    node="canon_init",
+                    chapter_index=chapter_index,
+                    used_llm=True,
+                    wrote_world=bool(need_world),
+                    wrote_characters=bool(need_chars),
+                    wrote_timeline=bool(need_timeline),
+                    wrote_style=bool(need_style),
+                    fallback_template=True,
+                )
+            state["canon_init_used_llm"] = True
+            return state
 
         wrote_world = False
         wrote_characters = False

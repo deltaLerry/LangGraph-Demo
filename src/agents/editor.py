@@ -90,6 +90,9 @@ def editor_agent(state: StoryState) -> StoryState:
                 "1) 先对照 Canon 设定（world/characters/timeline/style），这是“真值来源”\n"
                 "2) 再对照最近章节记忆（用于情节连续性）\n"
                 "3) planner 任务仅作参考（不可覆盖 Canon）\n"
+                "裁决原则（用于提升通过率，减少无谓返工）：\n"
+                "- 仅在出现“明确矛盾/硬性违背 Canon / 严重逻辑错误 / 严重可读性问题 / 明显违背文风或字数硬约束”时判定为 审核不通过。\n"
+                "- 不要因为 Canon 目前不完整/缺少条目 就直接判定不通过；如果只是缺设定，请尽量让正文用模糊表达通过，不要强行要求补全大全。\n"
                 "输出 JSON schema：\n"
                 "{\n"
                 '  "decision": "审核通过|审核不通过",\n'
@@ -109,7 +112,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 "- decision=审核通过 时 issues 为空数组。\n"
                 "- decision=审核不通过 时：每条 issue 必须包含 quote（从正文原样复制）。\n"
                 "- canon_key：若属于设定冲突/缺失，尽量给出可定位的路径（例如 characters.characters[0].taboos / world.rules[2].name）；否则写 N/A。\n"
-                "- action=canon_patch 仅在“Canon 明显缺失/需补充（非正文错误）”时使用；否则用 rewrite。\n"
+                "- action=canon_patch 仅在“确实需要固化进 Canon 且会影响后续一致性”的信息时使用；否则用 rewrite。\n"
                 "- 宁可少而准：如果找不到 quote，不要输出该条。"
             )
         )

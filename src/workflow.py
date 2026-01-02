@@ -18,7 +18,8 @@ def _next_step_after_editor(state: StoryState):
     max_rewrites = int(state.get("max_rewrites", 1))
     if writer_version < 1 + max_rewrites:
         return "writer"
-    return END
+    # 达到返工次数上限：仍然进入 memory（沉淀本章记忆），再由后续节点自行决定是否做设定沉淀。
+    return "memory"
 
 
 def build_chapter_app():
