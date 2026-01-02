@@ -1,6 +1,13 @@
 # 项目名
-莽荒纪
+苍神纪
 
 # 开篇词
 深山老林中走出来的年轻人，身怀神体，手握古拳，随着时间的流逝，逐渐意识到隐藏在世界尽头的秘密。
 如何打破这世界的枷锁，朝着数千年来从未有人踏上的路途前进？
+
+# 注意
+每个章节的情节需要完整。
+
+``` bash
+python src/main.py --idea-file "test-idea.md" --chapters 2 --target-words 3000 --apply-canon-suggestions --archive --yes
+```

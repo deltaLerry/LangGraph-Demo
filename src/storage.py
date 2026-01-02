@@ -378,6 +378,69 @@ def apply_canon_suggestions(
 
     stats = {"applied": 0, "skipped": 0, "backups": []}  # type: ignore[dict-item]
 
+    def _is_empty(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            return (s == "") or (s in ("N/A", "n/a", "待补充", "（待补充）", "（待明确）", "待明确", "未知"))
+        if isinstance(v, (list, tuple, dict, set)):
+            return len(v) == 0
+        return False
+
+    def _deep_merge_keep_old_on_empty(old: Any, new: Any) -> Any:
+        """
+        用于 Canon“增量补全”的保守合并：
+        - dict: 递归合并；new 为空则不覆盖 old
+        - list: new 非空则替换（避免 list 合并策略过度复杂）
+        - scalar: new 非空则覆盖，否则保留 old
+        """
+        if _is_empty(new):
+            return old
+        if isinstance(old, dict) and isinstance(new, dict):
+            out = dict(old)
+            for k, nv in new.items():
+                ov = out.get(k)
+                if isinstance(ov, dict) and isinstance(nv, dict):
+                    out[k] = _deep_merge_keep_old_on_empty(ov, nv)
+                elif isinstance(ov, list) and isinstance(nv, list):
+                    out[k] = nv if nv else ov
+                else:
+                    out[k] = nv if not _is_empty(nv) else ov
+            return out
+        if isinstance(old, list) and isinstance(new, list):
+            return new if new else old
+        return new
+
+    def _upsert_by_key(arr: List[Any], item: Any, *, key_fields: Tuple[str, ...]) -> bool:
+        """
+        在数组中按 key_fields 匹配 dict 并合并（用于人物/规则/势力等“同名更新”）。
+        返回 True 表示写入/更新成功；False 表示无法处理。
+        """
+        if not isinstance(item, dict):
+            return False
+        # 必须包含全部 key
+        for k in key_fields:
+            if k not in item or _is_empty(item.get(k)):
+                return False
+        # 查找匹配项
+        for i, cur in enumerate(arr):
+            if not isinstance(cur, dict):
+                continue
+            ok = True
+            for k in key_fields:
+                if cur.get(k) != item.get(k):
+                    ok = False
+                    break
+            if not ok:
+                continue
+            # 合并更新
+            arr[i] = _deep_merge_keep_old_on_empty(cur, item)
+            return True
+        # 不存在则追加
+        arr.append(item)
+        return True
+
     def _print_help() -> None:
         print(
             "\n交互指令：\n"
@@ -504,7 +567,32 @@ def apply_canon_suggestions(
             if not isinstance(arr, list):
                 stats["skipped"] += 1
                 continue
-            arr.append(value)
+            # value 可能本身就是 list（例如 editor 一次性给出多条 rules/events/characters）。
+            # 这里做“幂等 + 可增量更新（upsert）”：
+            # - 对 dict 且包含关键字段（如 name / chapter+event），视为同一实体的补全更新
+            # - 否则按深度相等去重追加
+            items_to_apply = value if isinstance(value, list) else [value]
+            for v in items_to_apply:
+                if v is None:
+                    continue
+                # characters.json: characters 按 name upsert
+                if target == "characters.json" and path == "characters":
+                    if _upsert_by_key(arr, v, key_fields=("name",)):
+                        continue
+                # world.json: rules/factions/places 按 name upsert
+                if target == "world.json" and path in ("rules", "factions", "places"):
+                    if _upsert_by_key(arr, v, key_fields=("name",)):
+                        continue
+                # timeline.json: events 按 (chapter,event) upsert；否则退化为 name
+                if target == "timeline.json" and path == "events":
+                    if _upsert_by_key(arr, v, key_fields=("chapter", "event")):
+                        continue
+                    if _upsert_by_key(arr, v, key_fields=("name",)):
+                        continue
+
+                # fallback：幂等追加
+                if v not in arr:
+                    arr.append(v)
         else:
             stats["skipped"] += 1
             continue
