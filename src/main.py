@@ -1,14 +1,18 @@
-from agents.planner import PlannerAgent
+from workflow import build_workflow
+from workflow_state import WorkflowState
 
 
 def main():
     idea = input("请输入你的小说点子：\n> ")
 
-    planner = PlannerAgent()
-    result = planner.plan(idea)
+    workflow = build_workflow()
 
-    print("\n=== 策划输出 ===")
-    print(result)
+    final_state = workflow.invoke(
+        WorkflowState(idea=idea)
+    )
+
+    print("\n=== LangGraph 执行结果 ===")
+    print(final_state["planner_result"])
 
 
 if __name__ == "__main__":
