@@ -3,7 +3,6 @@ from __future__ import annotations
 from langgraph.graph import StateGraph, END
 
 from state import StoryState
-from agents.planner import planner_agent
 from agents.writer import writer_agent
 from agents.editor import editor_agent
 from agents.memory import memory_agent
@@ -40,23 +39,3 @@ def build_chapter_app():
     graph.add_edge("memory", "canon_update")
     graph.add_edge("canon_update", END)
     return graph.compile()
-
-
-def build_app():
-    """
-    MVP 工作流：策划 -> 写手 -> 主编（不通过则返工到写手，最多 max_rewrites 次）
-    """
-    graph = StateGraph(StoryState)
-    graph.add_node("planner", planner_agent)
-    graph.add_node("writer", writer_agent)
-    graph.add_node("editor", editor_agent)
-    graph.add_node("memory", memory_agent)
-
-    graph.set_entry_point("planner")
-    graph.add_edge("planner", "writer")
-    graph.add_edge("writer", "editor")
-    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", "memory": "memory", END: END})
-    graph.add_edge("memory", END)
-
-    return graph.compile()
-

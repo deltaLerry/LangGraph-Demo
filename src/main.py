@@ -152,16 +152,18 @@ def main():
 
         # 优先使用 run_meta.json 中记录的 project_dir
         rel_project_dir = str(meta.get("project_dir") or "").strip()
-        if rel_project_dir:
-            project_dir = os.path.join(output_base, rel_project_dir.replace("/", os.sep))
-        else:
-            # 兜底：用 planner.json 的项目名来定位
-            planner = read_json(os.path.join(current_dir, "planner.json")) or {}
-            project_name = str(planner.get("项目名称") or settings.idea or "story")
-            project_dir = get_project_dir(output_base, project_name)
+        if not rel_project_dir:
+            raise ValueError("run_meta.json 缺少 project_dir：请使用最新流程先运行一次生成以写入 run_meta.json")
+        project_dir = os.path.join(output_base, rel_project_dir.replace("/", os.sep))
 
         ensure_canon_files(project_dir)
         ensure_memory_dirs(project_dir)
+        if args.archive_confirm and not _confirm("\n确认将 outputs/current 归档到项目 stages？(y/N) "):
+            print("已取消归档（未归档）。")
+            return
+        if args.dry_run:
+            print("dry-run：已跳过实际归档（未复制文件）。")
+            return
         archived_dir = archive_run(
             base_dir=output_base,
             project_dir=project_dir,
@@ -354,6 +356,7 @@ def main():
             "editor_decision": "",
             "editor_report": {},
             "canon_suggestions": [],
+            "canon_update_suggestions": [],
             "writer_used_llm": False,
             "editor_used_llm": False,
             "chapter_memory": {},
@@ -381,6 +384,7 @@ def main():
         feedback = final_state.get("editor_feedback", [])
         editor_report = final_state.get("editor_report") or {}
         canon_suggestions = final_state.get("canon_suggestions") or []
+        canon_update_suggestions = final_state.get("canon_update_suggestions") or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
@@ -394,6 +398,13 @@ def main():
         # 结构化落盘：canon_suggestions（默认不自动应用，仅供 review）
         if isinstance(canon_suggestions, list) and canon_suggestions:
             write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_suggestions.json"), {"items": canon_suggestions})
+
+        # 结构化落盘：canon_update_suggestions（来自 chapter memory 的沉淀建议；默认不自动应用）
+        if isinstance(canon_update_suggestions, list) and canon_update_suggestions:
+            write_json(
+                os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"),
+                {"items": canon_update_suggestions},
+            )
 
         # chapter memory：写入 current + 持久化 projects
         mem = final_state.get("chapter_memory") or {}

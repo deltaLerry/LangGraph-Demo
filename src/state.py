@@ -23,6 +23,8 @@ class StoryState(TypedDict, total=False):
     canon_init_used_llm: bool
     # Canon 增量更新（阶段2：从 chapter memory 沉淀回 canon）
     canon_update_used: bool
+    # Canon 增量更新建议（从 chapter memory 提炼出的可应用补丁；默认只落盘，需用户确认后再 apply）
+    canon_update_suggestions: List[Dict[str, Any]]
 
     planner_result: Dict[str, Any]
     planner_json: str

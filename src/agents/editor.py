@@ -120,7 +120,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 '      "issue": "string",\n'
                 '      "fix": "string",\n'
                 '      "action": "rewrite|canon_patch",\n'
-                '      "canon_patch": {"target":"world.json|characters.json|timeline.json|style.md|N/A","op":"append|upsert|note|N/A","path":"string|N/A","value":"any|N/A"}\n'
+                '      "canon_patch": {"target":"world.json|characters.json|timeline.json|style.md|N/A","op":"append|note|N/A","path":"string|N/A","value":"any|N/A"}\n'
                 "    }\n"
                 "  ]\n"
                 "}\n"
@@ -175,36 +175,9 @@ def editor_agent(state: StoryState) -> StoryState:
         issues_obj = report.get("issues")
         issues_list: List[Dict[str, Any]] = [x for x in issues_obj if isinstance(x, dict)] if isinstance(issues_obj, list) else []
 
-        # 兼容旧文本输出（兜底）
+        # 最新设计：LLM 必须输出严格 JSON；无法解析/字段不合法则直接报错（尽早暴露问题）
         if decision not in ("审核通过", "审核不通过"):
-            if text.startswith("审核通过"):
-                decision = "审核通过"
-                issues_list = []
-            else:
-                decision = "审核不通过"
-                # 把全文按行抽成反馈字符串
-                feedback_lines = []
-                for line in text.splitlines():
-                    s = line.strip()
-                    if not s or s == "审核不通过":
-                        continue
-                    if s.startswith(("-", "•", "*")):
-                        feedback_lines.append(s.lstrip("-•* ").strip())
-                    else:
-                        feedback_lines.append(s)
-                issues_list = [
-                    {
-                        "type": "N/A",
-                        "canon_key": "N/A",
-                        "quote": "",
-                        "issue": s,
-                        "fix": "",
-                        "action": "rewrite",
-                        "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
-                    }
-                    for s in feedback_lines
-                    if s
-                ]
+            raise ValueError("editor_agent: LLM 输出不是合法的 editor_report JSON（decision 需为 审核通过/审核不通过）")
 
         state["editor_report"] = {"decision": decision, "issues": issues_list}
         state["editor_decision"] = decision
