@@ -1,20 +1,54 @@
+from __future__ import annotations
+
 from langgraph.graph import StateGraph, END
 
-from workflow_state import WorkflowState
-from workflow_nodes import planner_node
+from state import StoryState
+from agents.planner import planner_agent
+from agents.writer import writer_agent
+from agents.editor import editor_agent
 
 
-def build_workflow():
-    graph = StateGraph(WorkflowState)
+def _next_step_after_editor(state: StoryState):
+    needs_rewrite = bool(state.get("needs_rewrite", False))
+    if not needs_rewrite:
+        return END
 
-    # 注册节点
-    graph.add_node("planner", planner_node)
+    writer_version = int(state.get("writer_version", 1))
+    max_rewrites = int(state.get("max_rewrites", 1))
+    if writer_version < 1 + max_rewrites:
+        return "writer"
+    return END
 
-    # 定义入口
+
+def build_chapter_app():
+    """
+    章节子工作流：写手 -> 主编（不通过则返工到写手，最多 max_rewrites 次）
+
+    用于“策划一次 + 多章节循环”的场景。
+    """
+    graph = StateGraph(StoryState)
+    graph.add_node("writer", writer_agent)
+    graph.add_node("editor", editor_agent)
+
+    graph.set_entry_point("writer")
+    graph.add_edge("writer", "editor")
+    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", END: END})
+    return graph.compile()
+
+
+def build_app():
+    """
+    MVP 工作流：策划 -> 写手 -> 主编（不通过则返工到写手，最多 max_rewrites 次）
+    """
+    graph = StateGraph(StoryState)
+    graph.add_node("planner", planner_agent)
+    graph.add_node("writer", writer_agent)
+    graph.add_node("editor", editor_agent)
+
     graph.set_entry_point("planner")
-
-    # 定义结束
-    graph.add_edge("planner", END)
+    graph.add_edge("planner", "writer")
+    graph.add_edge("writer", "editor")
+    graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", END: END})
 
     return graph.compile()
 

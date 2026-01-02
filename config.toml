@@ -1,0 +1,39 @@
+[app]
+# 默认点子（CLI/环境变量可覆盖）
+idea = "一个普通人意外进入修仙世界，被迫卷入宗门纷争"
+
+# 输出根目录
+output_base = "outputs"
+
+# 运行模式：
+# - "template"：强制模板（用于纯工作流验证，不走LLM）
+# - "llm"：强制LLM（未配置LLM时将报错）
+# - "auto"：有LLM就用LLM，否则用模板（默认）
+llm_mode = "auto"
+
+# 是否开启 debug：输出 debug.jsonl 运行日志 + call_graph.md 节点调用图
+debug = true
+
+[generation]
+# 目标字数（每章）
+target_words = 800
+
+# 章节数
+chapters = 1
+
+# 每章最多返工次数（不含首稿）
+max_rewrites = 2
+
+[llm]
+# DeepSeek（OpenAI兼容）
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-REPLACE_ME"
+model = "deepseek-chat"
+temperature = 0.7
+
+# DeepSeek/OpenAI兼容额外参数（按需配置）
+# max_tokens = 2048
+# top_p = 0.9
+# presence_penalty = 0.0
+# frequency_penalty = 0.0
+# timeout = 60

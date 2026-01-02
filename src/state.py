@@ -1,7 +1,29 @@
-from typing import TypedDict, Dict, Any
+from typing import TypedDict, Dict, Any, List, Optional
 
 class StoryState(TypedDict, total=False):
+    llm: Any
+    llm_mode: str
+    force_llm: bool
+    debug: bool
+    logger: Any
     user_input: str
+    target_words: int
+    max_rewrites: int
+    chapter_index: int
+    chapters_total: int
+
+    output_dir: str
+
     planner_result: Dict[str, Any]
+    planner_json: str
+    planner_used_llm: bool
+
     writer_result: str
+    writer_version: int
+    writer_used_llm: bool
+
+    editor_decision: str  # "审核通过" | "审核不通过"
+    editor_feedback: List[str]
+    needs_rewrite: bool
+    editor_used_llm: bool
 
