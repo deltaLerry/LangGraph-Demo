@@ -10,11 +10,14 @@ from llm import try_get_chat_llm
 from state import StoryState
 from storage import (
     archive_run,
+    apply_canon_suggestions,
     ensure_canon_files,
     ensure_memory_dirs,
     get_project_dir,
     get_max_chapter_memory_index,
     make_current_dir,
+    preview_canon_suggestions,
+    read_canon_suggestions_from_dir,
     read_json,
     write_json,
     write_text,
@@ -54,10 +57,27 @@ def main():
     parser.add_argument("--start-chapter", type=int, default=None, help="起始章节号（例如 101）。不填则 resume 模式自动推断为已有最大章+1")
     parser.add_argument("--archive", action="store_true", help="运行结束后自动归档（默认不归档，便于先review）")
     parser.add_argument(
+        "--archive-confirm",
+        action="store_true",
+        help="归档前需要你确认（推荐开启；可配合 --yes 跳过确认）",
+    )
+    parser.add_argument(
         "--archive-only",
         action="store_true",
         help="只归档当前 outputs/current（用于你review之后手动入库）；不会执行生成流程",
     )
+    parser.add_argument(
+        "--apply-canon-suggestions",
+        action="store_true",
+        help="运行结束后，读取 outputs/current/chapters/*canon_suggestions.json 并在你确认后应用到 projects/<project>/canon（默认不自动应用）",
+    )
+    parser.add_argument(
+        "--apply-canon-only",
+        action="store_true",
+        help="只应用当前 outputs/current 的 canon_suggestions（不运行生成流程）。用于你review后再执行。",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="只预览将要执行的变更，不实际写入（用于 apply-canon / archive 确认）")
+    parser.add_argument("--yes", action="store_true", help="跳过所有确认（危险：会直接应用/归档）。适合自动化")
     parser.add_argument("--llm-mode", type=str, default="", help="运行模式：template / llm / auto（覆盖配置）")
     parser.add_argument("--debug", action="store_true", help="开启debug日志（写入debug.jsonl与call_graph.md）")
     args = parser.parse_args()
@@ -115,6 +135,12 @@ def main():
     if args.resume and not args.project.strip():
         raise ValueError("续写模式必须指定 --project（用于定位 outputs/projects/<project>）")
 
+    def _confirm(msg: str) -> bool:
+        if args.yes:
+            return True
+        ans = input(msg).strip().lower()
+        return ans in ("y", "yes", "是", "确认")
+
     # 手动归档模式：你review完 outputs/current 后再跑一次这个命令即可入库
     if args.archive_only:
         current_dir = os.path.join(output_base, "current")
@@ -144,6 +170,34 @@ def main():
             run_id=run_id,
         )
         print(f"\n已将 current 手动归档到：{archived_dir}")
+        return
+
+    # 只应用 Canon 建议（不生成）
+    if args.apply_canon_only:
+        current_dir = os.path.join(output_base, "current")
+        if not os.path.exists(current_dir):
+            raise FileNotFoundError(f"未找到尝试输出目录：{current_dir}（请先运行一次生成流程）")
+        meta = read_json(os.path.join(current_dir, "run_meta.json")) or {}
+        rel_project_dir = str(meta.get("project_dir") or "").strip()
+        if not rel_project_dir:
+            raise ValueError("outputs/current/run_meta.json 缺少 project_dir，无法定位项目 canon 目录")
+        project_dir = os.path.join(output_base, rel_project_dir.replace("/", os.sep))
+        chapters_dir = os.path.join(current_dir, "chapters")
+        items = read_canon_suggestions_from_dir(chapters_dir)
+        print("\n=== Canon Suggestions Preview ===")
+        print(preview_canon_suggestions(items))
+        if not items:
+            print("\n（没有可应用的 canon_suggestions）")
+            return
+        if not _confirm("\n确认应用以上 Canon 建议到项目 Canon？(y/N) "):
+            print("已取消（未应用）。")
+            return
+        stats = apply_canon_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
+        print(f"\n已处理 Canon 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
+        if stats.get("backups"):
+            print("已生成备份：")
+            for b in stats["backups"]:
+                print(f"- {b}")
         return
 
     # “尝试目录”：只保留一个 current，每次覆盖写入
@@ -366,7 +420,33 @@ def main():
 
     logger.event("run_end")
     print(f"\n尝试输出目录：{current_dir}")
+    # 1) 可选：先应用 Canon 建议（用户确认点 #1）
+    if args.apply_canon_suggestions:
+        chapters_dir = os.path.join(current_dir, "chapters")
+        items = read_canon_suggestions_from_dir(chapters_dir)
+        print("\n=== Canon Suggestions Preview ===")
+        print(preview_canon_suggestions(items))
+        if items:
+            if _confirm("\n确认应用以上 Canon 建议到项目 Canon？(y/N) "):
+                stats = apply_canon_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
+                print(f"已处理 Canon 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
+                if stats.get("backups"):
+                    print("已生成备份：")
+                    for b in stats["backups"]:
+                        print(f"- {b}")
+            else:
+                print("已跳过应用 Canon 建议（未修改 canon）。")
+        else:
+            print("（没有可应用的 canon_suggestions）")
+
+    # 2) 可选：归档（用户确认点 #2）
     if args.archive:
+        if args.archive_confirm and not _confirm("\n确认将 outputs/current 归档到项目 stages？(y/N) "):
+            print("已取消归档（未归档）。")
+            return
+        if args.dry_run:
+            print("dry-run：已跳过实际归档（未复制文件）。")
+            return
         archived_dir = archive_run(
             base_dir=output_base,
             project_dir=project_dir,

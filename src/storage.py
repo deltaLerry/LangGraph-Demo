@@ -343,3 +343,200 @@ def archive_run(
     return dst
 
 
+def _deep_get(obj: Any, path: str) -> Any:
+    """
+    极简路径访问：a.b.c 只支持 dict 层级（不支持数组索引）。
+    """
+    cur = obj
+    for part in (path or "").split("."):
+        part = part.strip()
+        if not part:
+            continue
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _backup_file(path: str) -> str:
+    """
+    对单个文件做备份拷贝，返回备份路径。
+    """
+    if not os.path.exists(path):
+        return ""
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = f"{path}.bak.{ts}"
+    shutil.copy2(path, bak)
+    return bak
+
+
+def read_canon_suggestions_from_dir(chapters_dir: str) -> List[Dict[str, Any]]:
+    """
+    读取 chapters/*canon_suggestions.json，并汇总为一个 list。
+    约定：文件格式为 {"items":[...]}。
+    """
+    out: List[Dict[str, Any]] = []
+    if not chapters_dir or not os.path.exists(chapters_dir):
+        return out
+    for name in os.listdir(chapters_dir):
+        if not name.endswith(".canon_suggestions.json"):
+            continue
+        p = os.path.join(chapters_dir, name)
+        obj = read_json(p) or {}
+        items = obj.get("items") if isinstance(obj.get("items"), list) else []
+        for it in items:
+            if isinstance(it, dict):
+                out.append(it)
+    return out
+
+
+def preview_canon_suggestions(items: List[Dict[str, Any]]) -> str:
+    """
+    将建议格式化为可读文本，便于 CLI 打印与确认。
+    """
+    if not items:
+        return "（无）"
+    lines: List[str] = []
+    for i, it in enumerate(items, start=1):
+        cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
+        target = str(cp.get("target", "") or "N/A")
+        op = str(cp.get("op", "") or "N/A")
+        path = str(cp.get("path", "") or "N/A")
+        val = cp.get("value", "N/A")
+        issue = str(it.get("issue", "") or "").strip()
+        quote = str(it.get("quote", "") or "").strip()
+        lines.append(f"[{i}] target={target} op={op} path={path}")
+        if issue:
+            lines.append(f"    issue: {issue}")
+        if quote:
+            lines.append(f"    quote: {quote}")
+        # value 可能很长，截断
+        s = json.dumps(val, ensure_ascii=False) if not isinstance(val, str) else val
+        if len(s) > 240:
+            s = s[:220].rstrip() + "…"
+        lines.append(f"    value: {s}")
+    return "\n".join(lines).rstrip()
+
+
+def apply_canon_suggestions(
+    *,
+    project_dir: str,
+    items: List[Dict[str, Any]],
+    yes: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    将 editor 产出的 canon_suggestions 以“确认后应用”的方式写回 Canon。
+
+    当前只支持最保守的 patch 行为（避免误伤）：
+    - target=world.json / characters.json / timeline.json：仅支持 op=note（写入 notes） 或 op=append（追加到数组字段）
+    - target=style.md：op=append（追加到文件末尾，以 bullet 形式）
+
+    返回：统计信息与备份路径列表。
+    """
+    canon_dir = os.path.join(project_dir, "canon")
+    world_path = os.path.join(canon_dir, "world.json")
+    characters_path = os.path.join(canon_dir, "characters.json")
+    timeline_path = os.path.join(canon_dir, "timeline.json")
+    style_path = os.path.join(canon_dir, "style.md")
+
+    stats = {"applied": 0, "skipped": 0, "backups": []}  # type: ignore[dict-item]
+
+    def _confirm(msg: str) -> bool:
+        if yes:
+            return True
+        ans = input(msg).strip().lower()
+        return ans in ("y", "yes", "是", "确认")
+
+    for idx, it in enumerate(items, start=1):
+        cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
+        target = str(cp.get("target", "") or "").strip()
+        op = str(cp.get("op", "") or "").strip()
+        path = str(cp.get("path", "") or "").strip()
+        value = cp.get("value", None)
+
+        if not target or target == "N/A":
+            stats["skipped"] += 1
+            continue
+
+        # 每条建议逐条确认
+        if not _confirm(f"\n是否应用第{idx}条 Canon 建议？(y/N) "):
+            stats["skipped"] += 1
+            continue
+
+        if dry_run:
+            stats["applied"] += 1
+            continue
+
+        if target == "style.md":
+            bak = _backup_file(style_path)
+            if bak:
+                stats["backups"].append(bak)
+            old = read_text_if_exists(style_path)
+            line = str(value if value is not None else "").strip()
+            if not line:
+                stats["skipped"] += 1
+                continue
+            bullet = line if line.startswith("- ") else f"- {line}"
+            new = (old.rstrip() + "\n" + bullet + "\n").lstrip("\n")
+            write_text(style_path, new)
+            stats["applied"] += 1
+            continue
+
+        # JSON targets
+        if target == "world.json":
+            obj = read_json(world_path) or {}
+            bak = _backup_file(world_path)
+            if bak:
+                stats["backups"].append(bak)
+        elif target == "characters.json":
+            obj = read_json(characters_path) or {}
+            bak = _backup_file(characters_path)
+            if bak:
+                stats["backups"].append(bak)
+        elif target == "timeline.json":
+            obj = read_json(timeline_path) or {}
+            bak = _backup_file(timeline_path)
+            if bak:
+                stats["backups"].append(bak)
+        else:
+            stats["skipped"] += 1
+            continue
+
+        if op == "note":
+            # path 为空则默认写到 notes
+            key = path or "notes"
+            if key != "notes":
+                # 目前只支持 notes，避免复杂 path 修改
+                stats["skipped"] += 1
+                continue
+            prev = str(obj.get("notes", "") or "")
+            line = str(value if value is not None else "").strip()
+            if not line:
+                stats["skipped"] += 1
+                continue
+            if line not in prev:
+                obj["notes"] = (prev.rstrip() + ("\n" if prev.strip() else "") + line).strip()
+            # 写回
+        elif op == "append":
+            # append 到数组字段（如 rules/factions/places/events/characters）
+            arr = _deep_get(obj, path)
+            if not isinstance(arr, list):
+                stats["skipped"] += 1
+                continue
+            arr.append(value)
+        else:
+            stats["skipped"] += 1
+            continue
+
+        if target == "world.json":
+            write_json(world_path, obj)
+        elif target == "characters.json":
+            write_json(characters_path, obj)
+        else:
+            write_json(timeline_path, obj)
+        stats["applied"] += 1
+
+    return stats
+
+

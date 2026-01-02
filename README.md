@@ -110,7 +110,11 @@ python src\main.py --llm-mode llm
 - `outputs/current/`（一次尝试）
   - `planner.json`
   - `run_meta.json`
-  - `chapters/001.md`、`chapters/001.editor.md`、`chapters/001.memory.json`（仅“审核通过”时生成 memory）
+  - `chapters/001.md`
+  - `chapters/001.editor.md`（可读版）
+  - `chapters/001.editor.json`（结构化主编报告）
+  - `chapters/001.canon_suggestions.json`（可选：主编建议“更新设定”的补丁，仅供 review）
+  - `chapters/001.memory.json`（仅“审核通过”时生成 memory）
   - `debug.jsonl` / `call_graph.md`（开启 debug 时）
 - `outputs/projects/<project>/`（持久化）
   - `canon/`：`world.json` / `characters.json` / `timeline.json` / `style.md`
@@ -172,6 +176,53 @@ python src\main.py --llm-mode template
 - 写手节点已增加自动处理：
   - **过短/被截断**：自动续写补全（最多 2 段）
   - **过长**：不自动压缩（避免二次改写导致风格漂移），仅在日志中记录告警
+
+## 两个“需要你确认”的介入点（推荐工作流）
+
+本项目默认偏“安全”：**不会未经确认就修改 Canon，也不会未经确认就归档**（除非你显式 `--yes`）。
+
+### 1) 应用 Canon 建议（主编给出的设定补丁）
+
+- 生成时只会落盘建议：`outputs/current/chapters/*.canon_suggestions.json`
+- 你 review 之后再应用（交互确认）：
+
+```bash
+python src\main.py --apply-canon-only
+```
+
+- 运行结束后自动进入“预览→确认→应用”的交互流程（推荐）：
+
+```bash
+python src\main.py --apply-canon-suggestions
+```
+
+- 预览但不写入（dry-run）：
+
+```bash
+python src\main.py --apply-canon-only --dry-run
+```
+
+### 2) 归档（把 current 复制入项目 stages）
+
+- 运行结束时归档前确认（推荐）：
+
+```bash
+python src\main.py --archive --archive-confirm
+```
+
+- 你 review 完再手动归档（最稳）：
+
+```bash
+python src\main.py --archive-only
+```
+
+### 自动化（无人值守）
+
+如果你确实要跳过所有确认：
+
+```bash
+python src\main.py --apply-canon-suggestions --archive --yes
+```
 
 ## 续写（例如已有100章，继续写第101章）
 
