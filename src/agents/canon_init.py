@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Tuple
 
 from state import StoryState
@@ -45,6 +46,28 @@ def _merge_keep_existing(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[
         if k not in out or out.get(k) in (None, "", [], {}):
             out[k] = v
     return out
+
+
+def _extract_first_json_obj(text: str) -> Dict[str, Any]:
+    """
+    兼容 LLM 输出带 ```json ... ``` / 多余前后缀的情况。
+    """
+    s = (text or "").strip()
+    if not s:
+        return {}
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
 
 
 def canon_init_agent(state: StoryState) -> StoryState:
@@ -149,28 +172,30 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 chapter_index=chapter_index,
                 content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
             )
-        try:
-            obj = json.loads(text)
-        except Exception:
-            obj = {}
+        obj = _extract_first_json_obj(text)
+        new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}
+        new_chars = obj.get("characters") if isinstance(obj.get("characters"), dict) else {}
+        new_timeline = obj.get("timeline") if isinstance(obj.get("timeline"), dict) else {}
+        style_suggestions = str(obj.get("style_suggestions", "") or "")
 
-        if isinstance(obj, dict):
-            new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}
-            new_chars = obj.get("characters") if isinstance(obj.get("characters"), dict) else {}
-            new_timeline = obj.get("timeline") if isinstance(obj.get("timeline"), dict) else {}
-            style_suggestions = str(obj.get("style_suggestions", "") or "")
-        else:
-            new_world, new_chars, new_timeline, style_suggestions = {}, {}, {}, ""
+        wrote_world = False
+        wrote_characters = False
+        wrote_timeline = False
+        wrote_style = False
 
         if need_world and isinstance(new_world, dict) and new_world:
             write_json(world_path, _merge_keep_existing(existing_world, new_world))
+            wrote_world = True
         if need_chars and isinstance(new_chars, dict) and new_chars:
             write_json(characters_path, _merge_keep_existing(existing_characters, new_chars))
+            wrote_characters = True
         if need_timeline and isinstance(new_timeline, dict) and new_timeline:
             write_json(timeline_path, _merge_keep_existing(existing_timeline, new_timeline))
+            wrote_timeline = True
         if need_style and style_suggestions.strip():
             # 不覆盖用户已经写的 style.md；仅在空时写入建议
             write_text(style_path, style_suggestions.strip() + "\n")
+            wrote_style = True
 
         if logger:
             logger.event(
@@ -178,10 +203,10 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 node="canon_init",
                 chapter_index=chapter_index,
                 used_llm=True,
-                wrote_world=bool(need_world),
-                wrote_characters=bool(need_chars),
-                wrote_timeline=bool(need_timeline),
-                wrote_style=bool(need_style and style_suggestions.strip()),
+                wrote_world=wrote_world,
+                wrote_characters=wrote_characters,
+                wrote_timeline=wrote_timeline,
+                wrote_style=wrote_style,
             )
         state["canon_init_used_llm"] = True
         return state
