@@ -7,6 +7,7 @@ from agents.planner import planner_agent
 from agents.writer import writer_agent
 from agents.editor import editor_agent
 from agents.memory import memory_agent
+from agents.canon_update import canon_update_agent
 
 
 def _next_step_after_editor(state: StoryState):
@@ -31,11 +32,13 @@ def build_chapter_app():
     graph.add_node("writer", writer_agent)
     graph.add_node("editor", editor_agent)
     graph.add_node("memory", memory_agent)
+    graph.add_node("canon_update", canon_update_agent)
 
     graph.set_entry_point("writer")
     graph.add_edge("writer", "editor")
     graph.add_conditional_edges("editor", _next_step_after_editor, {"writer": "writer", "memory": "memory", END: END})
-    graph.add_edge("memory", END)
+    graph.add_edge("memory", "canon_update")
+    graph.add_edge("canon_update", END)
     return graph.compile()
 
 

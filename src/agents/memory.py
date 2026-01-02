@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from state import StoryState
 from debug_log import truncate_text
 from llm_meta import extract_finish_reason_and_usage
+from storage import load_canon_bundle
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -126,22 +127,23 @@ def memory_agent(state: StoryState) -> StoryState:
         return state
 
     # 模板兜底
-    def _guess_people(text: str) -> List[str]:
-        # 极简：抓取可能的人名（2~4个中文字符）并去重；仅用于模板检索，不追求准确
-        cand = re.findall(r"[\u4e00-\u9fff]{2,4}", text or "")
-        # 过滤高频泛词
-        stop = set(["一个", "普通", "意外", "宗门", "弟子", "山门", "修仙", "这里", "他们", "有人", "这一刻"])
-        out: List[str] = []
-        for w in cand:
-            if w in stop:
-                continue
-            if w not in out:
-                out.append(w)
-            if len(out) >= 8:
-                break
-        return out
-
-    people = _guess_people(writer_result)
+    # 模板模式下不要用正则“猜人名”（很容易把项目名切碎污染设定）；
+    # 优先取 Canon 的第一个角色名作为主角锚点，保证后续 canon_update 不产生垃圾角色。
+    people: List[str] = []
+    project_dir = str(state.get("project_dir", "") or "")
+    try:
+        if project_dir:
+            canon = load_canon_bundle(project_dir)
+            chars = canon.get("characters") if isinstance(canon.get("characters"), dict) else {}
+            arr = chars.get("characters") if isinstance(chars.get("characters"), list) else []
+            if arr and isinstance(arr[0], dict):
+                n = str(arr[0].get("name", "") or "").strip()
+                if n:
+                    people = [n]
+    except Exception:
+        people = []
+    if not people:
+        people = ["主角"]
     mem = {
         "chapter_index": chapter_index,
         "summary": (writer_result[:180] + "…") if len(writer_result) > 180 else writer_result,
@@ -153,7 +155,7 @@ def memory_agent(state: StoryState) -> StoryState:
                 "result": "",
             }
         ],
-        "character_updates": [{"name": p, "status": "", "new_info": ""} for p in people[:3]],
+        "character_updates": [{"name": p, "status": "", "new_info": ""} for p in people[:1]],
         "new_facts": [],
         "open_threads": [],
         "style_notes": [],

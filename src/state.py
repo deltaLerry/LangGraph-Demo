@@ -21,6 +21,8 @@ class StoryState(TypedDict, total=False):
 
     # Canon 初始化（阶段2.2）
     canon_init_used_llm: bool
+    # Canon 增量更新（阶段2：从 chapter memory 沉淀回 canon）
+    canon_update_used: bool
 
     planner_result: Dict[str, Any]
     planner_json: str
