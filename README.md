@@ -244,3 +244,37 @@ python src\main.py --project "你的项目名" --start-chapter 101 --chapters 1
 - 需求与角色设定：`产品设计文档.md`
 - 最新架构与阶段规划：`项目架构与阶段规划.md`
 
+
+## Tools
+### 归档工具
+为了不影响cursor（这个打包工具代码很多，会拖慢cursor的速度）我将归档工具放入了这个目录：
+> /d/projects/scripts/linglongwenxin/archive.py
+
+使用方法：
+在手动归档时，调用这个工具。需要先进入到归档的目录中（或者手动指定归档的源目录）
+（注意！！！不需要放到自动化节点里面！！！ 后续有需要再加）
+
+使用示例：
+```bash
+86188@LAPTOP-MM3TJMQK MINGW64 /d/projects/lang-graph/LangGraph-Demo/outputs/projects/迷雾重重/stages/stage1/runs/20260103-071908/chapters (main)
+$ python /d/projects/scripts/linglongwenxin/archive.py
+=== MD文件归档工具 ===
+Archive MD Files Tool
+========================================
+请输入源目录路径（留空使用当前目录）:
+请输入备份目录名称（留空使用默认: md_archive_20260103）:
+
+是否生成HTML目录网页？(y/n, 默认: y): y
+是否创建压缩包？(y/n, 默认: y): y
+
+========================================
+� 归档配置摘要
+========================================
+� 源目录: D:\projects\lang-graph\LangGraph-Demo\outputs\projects\迷雾重重\stages\stage1\runs\20260103-071908\chapters
+� 备份目录: D:\projects\lang-graph\LangGraph-Demo\outputs\projects\迷雾重重\stages\stage1\runs\20260103-071908\md_archive_20260103
+� 生成HTML目录: 是
+� 创建压缩包: 是
+========================================
+
+确认开始归档？(y/n): y
+```
