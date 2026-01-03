@@ -18,6 +18,7 @@ from storage import (
     get_project_dir,
     get_max_chapter_memory_index,
     make_current_dir,
+    load_materials_bundle,
     preview_materials_suggestions,
     preview_canon_suggestions,
     read_canon_suggestions_from_dir,
@@ -343,11 +344,30 @@ def main():
     planned_state = canon_init_agent(planned_state)
 
     # 阶段3：多角色材料包（先串行，稳定后再升级为 LangGraph 并行分支）
+    # 先加载项目长期 materials（outline/tone），作为本次材料包的“基底”（计划类约束）
+    try:
+        long_materials = load_materials_bundle(project_dir)
+    except Exception:
+        long_materials = {"outline": {}, "tone": {}}
+    planned_state["long_materials"] = long_materials  # 仅用于调试/追溯（不强依赖）
+
     planned_state = architect_agent(planned_state)
     planned_state = character_director_agent(planned_state)
     planned_state = screenwriter_agent(planned_state)
     planned_state = tone_agent(planned_state)
     planned_state = materials_aggregator_agent(planned_state)
+    # 将长期 materials 合并进 materials_bundle（不覆盖本次专家更具体的产出，只填空）
+    try:
+        mb = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+        if isinstance(mb, dict) and mb:
+            if isinstance(long_materials, dict):
+                if "outline" in long_materials and (not mb.get("outline")):
+                    mb["outline"] = long_materials.get("outline") or {}
+                if "tone" in long_materials and (not mb.get("tone")):
+                    mb["tone"] = long_materials.get("tone") or {}
+            planned_state["materials_bundle"] = mb
+    except Exception:
+        pass
     # 阶段3：materials_init（同步会议）——仅在项目 materials 为空/占位时初始化（受 Canon 硬约束）
     planned_state = materials_init_agent(planned_state)
 

@@ -20,6 +20,9 @@ def canon_update_agent(state: StoryState) -> StoryState:
 
     # 注意：canon_update_suggestions 是“建议层”，不直接修改 Canon；
     # 为了保持落盘章节的一致性（即使审核不通过/达到返工上限），此处不再以 editor_decision 作为门控条件。
+    #
+    # 数据治理门禁（默认更安全）：仅在“审核通过”时产出沉淀建议。
+    # 如你确实要在不通过时也产出建议，请在 state 中设置 allow_unapproved_updates=True。
 
     project_dir = str(state.get("project_dir", "") or "")
     if not project_dir:
@@ -41,6 +44,12 @@ def canon_update_agent(state: StoryState) -> StoryState:
     suggestions: List[Dict[str, Any]] = []
     editor_decision = str(state.get("editor_decision", "") or "").strip()
     approved = editor_decision == "审核通过"
+    if (not approved) and (not bool(state.get("allow_unapproved_updates", False))):
+        state["canon_update_used"] = False
+        state["canon_update_suggestions"] = []
+        if logger:
+            logger.event("node_end", node="canon_update", chapter_index=chapter_index, skipped=True, reason="not_approved")
+        return state
 
     # 1) new_facts：写入 world.json notes（最安全，避免 schema/定位复杂）
     new_facts = mem.get("new_facts") if isinstance(mem.get("new_facts"), list) else []

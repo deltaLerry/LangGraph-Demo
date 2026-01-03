@@ -55,6 +55,19 @@ def tone_agent(state: StoryState) -> StoryState:
             llm = None
 
     if llm:
+        def _invoke_once(node_name: str, system_msg: SystemMessage, human_msg: HumanMessage):
+            if logger:
+                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                with logger.llm_call(
+                    node=node_name,
+                    chapter_index=0,
+                    messages=[system_msg, human_msg],
+                    model=model,
+                    base_url=str(getattr(llm, "base_url", "") or ""),
+                ):
+                    return llm.invoke([system_msg, human_msg])
+            return llm.invoke([system_msg, human_msg])
+
         system = SystemMessage(
             content=(
                 "你是小说项目的“基调策划”，负责把文风约束写成可执行清单。\n"
@@ -82,18 +95,7 @@ def tone_agent(state: StoryState) -> StoryState:
                 + f"{style_text}\n"
             )
         )
-        if logger:
-            model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-            with logger.llm_call(
-                node="tone",
-                chapter_index=0,
-                messages=[system, human],
-                model=model,
-                base_url=str(getattr(llm, "base_url", "") or ""),
-            ):
-                resp = llm.invoke([system, human])
-        else:
-            resp = llm.invoke([system, human])
+        resp = _invoke_once("tone", system, human)
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
             fr, usage = extract_finish_reason_and_usage(resp)
@@ -106,13 +108,48 @@ def tone_agent(state: StoryState) -> StoryState:
                 token_usage=usage,
             )
         obj = _extract(text)
+        fr0, _usage0 = extract_finish_reason_and_usage(resp)
+
+        if (not obj) or (fr0 and str(fr0).lower() == "length"):
+            system_retry = SystemMessage(
+                content=(
+                    "你是小说项目的“基调策划”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
+                    "务必短：确保 JSON 完整可解析。\n"
+                    "硬性约束：\n"
+                    "- style_constraints 6~10条，每条<=30字\n"
+                    "- avoid 5~8条，每条<=20字\n"
+                    "- narration/pacing/reference_style 尽量短\n"
+                    "输出 JSON schema 与上一次相同。\n"
+                )
+            )
+            resp2 = _invoke_once("tone_retry", system_retry, human)
+            text2 = (getattr(resp2, "content", "") or "").strip()
+            if logger:
+                fr2, usage2 = extract_finish_reason_and_usage(resp2)
+                logger.event(
+                    "llm_response",
+                    node="tone_retry",
+                    chapter_index=0,
+                    content=truncate_text(text2, max_chars=getattr(logger, "max_chars", 20000)),
+                    finish_reason=fr2,
+                    token_usage=usage2,
+                )
+            obj2 = _extract(text2)
+            if obj2:
+                obj = obj2
+
         if not obj:
-            raise ValueError("tone_agent: 无法从 LLM 输出中提取 JSON")
-        state["tone_result"] = obj
-        state["tone_used_llm"] = True
-        if logger:
-            logger.event("node_end", node="tone", chapter_index=0, used_llm=True)
-        return state
+            if state.get("force_llm", False):
+                raise ValueError("tone_agent: 无法从 LLM 输出中提取 JSON（已重试）")
+            if logger:
+                logger.event("llm_parse_failed", node="tone", chapter_index=0, action="fallback_template")
+            llm = None
+        else:
+            state["tone_result"] = obj
+            state["tone_used_llm"] = True
+            if logger:
+                logger.event("node_end", node="tone", chapter_index=0, used_llm=True)
+            return state
 
     state["tone_result"] = {
         "narration": "（模板）第三人称/或第一人称（后续可明确）",

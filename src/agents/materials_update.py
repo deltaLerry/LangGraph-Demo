@@ -7,7 +7,7 @@ from state import StoryState
 from debug_log import truncate_text
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
-from storage import load_canon_bundle
+from storage import load_canon_bundle, normalize_canon_bundle
 from materials import materials_prompt_digest
 
 
@@ -33,7 +33,8 @@ def materials_update_agent(state: StoryState) -> StoryState:
         logger.event("node_start", node="materials_update", chapter_index=chapter_index)
 
     project_dir = str(state.get("project_dir", "") or "")
-    canon = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+    canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+    canon = normalize_canon_bundle(canon0)
     canon_text = truncate_text(
         json.dumps(
             {
@@ -58,6 +59,17 @@ def materials_update_agent(state: StoryState) -> StoryState:
         state["materials_update_suggestions"] = []
         if logger:
             logger.event("node_end", node="materials_update", chapter_index=chapter_index, skipped=True, reason="missing_materials_bundle")
+        return state
+
+    # 数据治理门禁（默认更安全）：仅在“审核通过”时产出 materials_update_suggestions。
+    # 如你确实要在不通过时也产出建议，请在 state 中设置 allow_unapproved_updates=True。
+    editor_decision = str(state.get("editor_decision", "") or "").strip()
+    approved = editor_decision == "审核通过"
+    if (not approved) and (not bool(state.get("allow_unapproved_updates", False))):
+        state["materials_update_used"] = False
+        state["materials_update_suggestions"] = []
+        if logger:
+            logger.event("node_end", node="materials_update", chapter_index=chapter_index, skipped=True, reason="not_approved")
         return state
 
     llm = state.get("llm")

@@ -195,6 +195,115 @@ def load_canon_bundle(project_dir: str) -> Dict[str, Any]:
     }
 
 
+def _split_list_like(s: str) -> List[str]:
+    s = str(s or "").strip()
+    if not s:
+        return []
+    # 常见分隔：中文顿号/逗号/分号/换行/斜杠
+    for sep in ["\n", "；", ";", "、", "，", ",", "/", "|"]:
+        s = s.replace(sep, " ")
+    parts = [p.strip() for p in s.split(" ") if p.strip()]
+    # 去重保持顺序
+    seen = set()
+    out: List[str] = []
+    for p in parts:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def normalize_canon_bundle(canon: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    读时归一化 Canon（不做破坏性迁移，主要用于 prompt 注入/合并/upsert）。
+    目标：把历史字段差异（detail/desc、string/list）统一成更稳定的形态。
+    """
+    c = canon if isinstance(canon, dict) else {}
+    world = c.get("world") if isinstance(c.get("world"), dict) else {}
+    characters = c.get("characters") if isinstance(c.get("characters"), dict) else {}
+    timeline = c.get("timeline") if isinstance(c.get("timeline"), dict) else {}
+
+    # world: rules/factions/places: 统一 desc 字段（兼容 detail）
+    def _norm_named_arr(arr: Any) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if not isinstance(arr, list):
+            return out
+        for it in arr:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name", "") or "").strip()
+            if not name:
+                continue
+            desc = str(it.get("desc", "") or "").strip()
+            if not desc:
+                desc = str(it.get("detail", "") or "").strip()
+            out.append({"name": name, "desc": desc, **{k: v for k, v in it.items() if k not in ("detail",)}})
+        return out
+
+    world_n = dict(world)
+    world_n["rules"] = _norm_named_arr(world.get("rules"))
+    world_n["factions"] = _norm_named_arr(world.get("factions"))
+    world_n["places"] = _norm_named_arr(world.get("places"))
+    world_n["notes"] = str(world.get("notes", "") or "")
+
+    # characters: 统一 traits/abilities/taboos 为 list，兼容旧字段 personality/abilities/taboos 的 string
+    chars_arr = characters.get("characters")
+    out_chars: List[Dict[str, Any]] = []
+    if isinstance(chars_arr, list):
+        for it in chars_arr:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name", "") or "").strip()
+            if not name:
+                continue
+            traits = it.get("traits")
+            if not isinstance(traits, list) or not traits:
+                traits = _split_list_like(it.get("personality", ""))
+            abilities = it.get("abilities")
+            if not isinstance(abilities, list):
+                abilities = _split_list_like(it.get("abilities", ""))
+            taboos = it.get("taboos")
+            if not isinstance(taboos, list):
+                taboos = _split_list_like(it.get("taboos", ""))
+            # relationships: 兼容 dict list -> string list
+            rels: List[str] = []
+            r = it.get("relationships")
+            if isinstance(r, list):
+                for rv in r:
+                    if isinstance(rv, str) and rv.strip():
+                        rels.append(rv.strip())
+                    elif isinstance(rv, dict):
+                        w = str(rv.get("with", "") or "").strip()
+                        rel = str(rv.get("relation", "") or "").strip()
+                        if w and rel:
+                            rels.append(f"{w}:{rel}")
+            out_chars.append(
+                {
+                    "name": name,
+                    "traits": [str(x).strip() for x in traits if str(x).strip()],
+                    "motivation": str(it.get("motivation", "") or ""),
+                    "background": str(it.get("background", "") or ""),
+                    "abilities": [str(x).strip() for x in abilities if str(x).strip()],
+                    "taboos": [str(x).strip() for x in taboos if str(x).strip()],
+                    "relationships": rels,
+                    "notes": str(it.get("notes", "") or ""),
+                }
+            )
+    characters_n = {"characters": out_chars}
+
+    # timeline: 尽量统一 events 为 list[dict]，兼容 order/when/what/impact 或 chapter/event
+    events = timeline.get("events")
+    out_events: List[Dict[str, Any]] = []
+    if isinstance(events, list):
+        for it in events:
+            if isinstance(it, dict) and it:
+                out_events.append(dict(it))
+    timeline_n = {"events": out_events}
+
+    return {"world": world_n, "characters": characters_n, "timeline": timeline_n, "style": c.get("style", "")}
+
+
 def load_recent_chapter_memories(
     project_dir: str, *, before_chapter: int, k: int = 3
 ) -> List[Dict[str, Any]]:
@@ -381,6 +490,10 @@ def preview_materials_suggestions(items: List[Dict[str, Any]]) -> str:
         return "（无）"
     lines: List[str] = []
     for i, it in enumerate(items, start=1):
+        # 防御：只预览 materials_patch（若 action 存在且不是 materials_patch，则跳过）
+        act = str(it.get("action", "") or "").strip()
+        if act and act != "materials_patch":
+            continue
         mp = it.get("materials_patch") if isinstance(it.get("materials_patch"), dict) else {}
         target = str(mp.get("target", "") or "N/A")
         op = str(mp.get("op", "") or "N/A")
@@ -486,6 +599,11 @@ def apply_materials_suggestions(
     quit_all = False
     for idx, it in enumerate(items, start=1):
         if quit_all:
+            stats["skipped"] += 1
+            continue
+        # 防御：只允许应用 materials_patch（若 action 存在且不是 materials_patch，则跳过）
+        act = str(it.get("action", "") or "").strip()
+        if act and act != "materials_patch":
             stats["skipped"] += 1
             continue
         mp = it.get("materials_patch") if isinstance(it.get("materials_patch"), dict) else {}
@@ -609,6 +727,10 @@ def preview_canon_suggestions(items: List[Dict[str, Any]]) -> str:
         return "（无）"
     lines: List[str] = []
     for i, it in enumerate(items, start=1):
+        # 防御：只预览 canon_patch（若 action 存在且不是 canon_patch，则跳过）
+        act = str(it.get("action", "") or "").strip()
+        if act and act != "canon_patch":
+            continue
         cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
         target = str(cp.get("target", "") or "N/A")
         op = str(cp.get("op", "") or "N/A")
@@ -735,6 +857,11 @@ def apply_canon_suggestions(
 
     for idx, it in enumerate(items, start=1):
         if quit_all:
+            stats["skipped"] += 1
+            continue
+        # 防御：只允许应用 canon_patch（若 action 存在且不是 canon_patch，则跳过）
+        act = str(it.get("action", "") or "").strip()
+        if act and act != "canon_patch":
             stats["skipped"] += 1
             continue
         cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}

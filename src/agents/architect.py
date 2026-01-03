@@ -54,6 +54,19 @@ def architect_agent(state: StoryState) -> StoryState:
             llm = None
 
     if llm:
+        def _invoke_once(node_name: str, system_msg: SystemMessage, human_msg: HumanMessage):
+            if logger:
+                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                with logger.llm_call(
+                    node=node_name,
+                    chapter_index=0,
+                    messages=[system_msg, human_msg],
+                    model=model,
+                    base_url=str(getattr(llm, "base_url", "") or ""),
+                ):
+                    return llm.invoke([system_msg, human_msg])
+            return llm.invoke([system_msg, human_msg])
+
         system = SystemMessage(
             content=(
                 "你是小说项目的“架构师”，负责构建世界观设定。\n"
@@ -77,12 +90,7 @@ def architect_agent(state: StoryState) -> StoryState:
                 + (f"\n策划任务书（世界观设定）：\n{instr}\n" if instr else "")
             )
         )
-        if logger:
-            model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-            with logger.llm_call(node="architect", chapter_index=0, messages=[system, human], model=model, base_url=str(getattr(llm, "base_url", "") or "")):
-                resp = llm.invoke([system, human])
-        else:
-            resp = llm.invoke([system, human])
+        resp = _invoke_once("architect", system, human)
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
             fr, usage = extract_finish_reason_and_usage(resp)
@@ -95,13 +103,52 @@ def architect_agent(state: StoryState) -> StoryState:
                 token_usage=usage,
             )
         obj = _extract(text)
+        fr0, _usage0 = extract_finish_reason_and_usage(resp)
+
+        # 失败/截断：做一次短版重试（更稳）
+        if (not obj) or (fr0 and str(fr0).lower() == "length"):
+            system_retry = SystemMessage(
+                content=(
+                    "你是小说项目的“架构师”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
+                    "务必短：确保 JSON 完整可解析。\n"
+                    "硬性约束：\n"
+                    "- rules 6条以内\n"
+                    "- factions 3条以内\n"
+                    "- places 3条以内\n"
+                    "- 每条 desc 不超过 120 字\n"
+                    "- notes 不超过 180 字\n"
+                    "输出 JSON schema 与上一次相同。\n"
+                )
+            )
+            resp2 = _invoke_once("architect_retry", system_retry, human)
+            text2 = (getattr(resp2, "content", "") or "").strip()
+            if logger:
+                fr2, usage2 = extract_finish_reason_and_usage(resp2)
+                logger.event(
+                    "llm_response",
+                    node="architect_retry",
+                    chapter_index=0,
+                    content=truncate_text(text2, max_chars=getattr(logger, "max_chars", 20000)),
+                    finish_reason=fr2,
+                    token_usage=usage2,
+                )
+            obj2 = _extract(text2)
+            if obj2:
+                obj = obj2
+
+        # 若仍失败：auto 模式降级为模板；force_llm 则抛错
         if not obj:
-            raise ValueError("architect_agent: 无法从 LLM 输出中提取 JSON")
-        state["architect_result"] = obj
-        state["architect_used_llm"] = True
-        if logger:
-            logger.event("node_end", node="architect", chapter_index=0, used_llm=True)
-        return state
+            if state.get("force_llm", False):
+                raise ValueError("architect_agent: 无法从 LLM 输出中提取 JSON（已重试）")
+            if logger:
+                logger.event("llm_parse_failed", node="architect", chapter_index=0, action="fallback_template")
+            llm = None
+        else:
+            state["architect_result"] = obj
+            state["architect_used_llm"] = True
+            if logger:
+                logger.event("node_end", node="architect", chapter_index=0, used_llm=True)
+            return state
 
     # 模板兜底：保证结构存在，方便后续汇总/落盘
     state["architect_result"] = {

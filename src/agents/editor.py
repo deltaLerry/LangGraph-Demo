@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 
 from state import StoryState
 from debug_log import truncate_text
-from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
+from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories, normalize_canon_bundle
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from materials import materials_prompt_digest
@@ -65,7 +65,8 @@ def editor_agent(state: StoryState) -> StoryState:
         # === 2.1：注入 Canon + 最近记忆（控制长度） ===
         chapter_index = int(state.get("chapter_index", 1))
         project_dir = str(state.get("project_dir", "") or "")
-        canon = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+        canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+        canon = normalize_canon_bundle(canon0)
         k = int(state.get("memory_recent_k", 3) or 3)
         recent_memories = load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k) if project_dir else []
         canon_text = truncate_text(

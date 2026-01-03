@@ -61,6 +61,19 @@ def screenwriter_agent(state: StoryState) -> StoryState:
             llm = None
 
     if llm:
+        def _invoke_once(node_name: str, system_msg: SystemMessage, human_msg: HumanMessage):
+            if logger:
+                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+                with logger.llm_call(
+                    node=node_name,
+                    chapter_index=0,
+                    messages=[system_msg, human_msg],
+                    model=model,
+                    base_url=str(getattr(llm, "base_url", "") or ""),
+                ):
+                    return llm.invoke([system_msg, human_msg])
+            return llm.invoke([system_msg, human_msg])
+
         system = SystemMessage(
             content=(
                 "你是小说项目的“编剧”，负责主线与章节细纲。\n"
@@ -96,18 +109,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 + f"{canon_text}\n"
             )
         )
-        if logger:
-            model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-            with logger.llm_call(
-                node="screenwriter",
-                chapter_index=0,
-                messages=[system, human],
-                model=model,
-                base_url=str(getattr(llm, "base_url", "") or ""),
-            ):
-                resp = llm.invoke([system, human])
-        else:
-            resp = llm.invoke([system, human])
+        resp = _invoke_once("screenwriter", system, human)
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
             fr, usage = extract_finish_reason_and_usage(resp)
@@ -120,28 +122,64 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 token_usage=usage,
             )
         obj = _extract(text)
+        fr0, _usage0 = extract_finish_reason_and_usage(resp)
+
+        if (not obj) or (fr0 and str(fr0).lower() == "length"):
+            system_retry = SystemMessage(
+                content=(
+                    "你是小说项目的“编剧”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
+                    "务必短：确保 JSON 完整可解析。\n"
+                    f"硬性约束：chapters 仍需包含 1..{chapters_total} 每一章，但每章 beats 只写 2~3 条，每条不超过 35 字。\n"
+                    "title/goal/conflict/ending_hook 尽量短。\n"
+                    "输出 JSON schema 与上一次相同。\n"
+                )
+            )
+            resp2 = _invoke_once("screenwriter_retry", system_retry, human)
+            text2 = (getattr(resp2, "content", "") or "").strip()
+            if logger:
+                fr2, usage2 = extract_finish_reason_and_usage(resp2)
+                logger.event(
+                    "llm_response",
+                    node="screenwriter_retry",
+                    chapter_index=0,
+                    content=truncate_text(text2, max_chars=getattr(logger, "max_chars", 20000)),
+                    finish_reason=fr2,
+                    token_usage=usage2,
+                )
+            obj2 = _extract(text2)
+            if obj2:
+                obj = obj2
+
         if not obj:
-            raise ValueError("screenwriter_agent: 无法从 LLM 输出中提取 JSON")
-        state["screenwriter_result"] = obj
-        state["screenwriter_used_llm"] = True
-        if logger:
-            logger.event("node_end", node="screenwriter", chapter_index=0, used_llm=True)
-        return state
+            if state.get("force_llm", False):
+                raise ValueError("screenwriter_agent: 无法从 LLM 输出中提取 JSON（已重试）")
+            if logger:
+                logger.event("llm_parse_failed", node="screenwriter", chapter_index=0, action="fallback_template")
+            llm = None
+        else:
+            state["screenwriter_result"] = obj
+            state["screenwriter_used_llm"] = True
+            if logger:
+                logger.event("node_end", node="screenwriter", chapter_index=0, used_llm=True)
+            return state
 
     # 模板兜底：给最小可用细纲（至少包含第1章）
+    chapters = []
+    for i in range(1, max(1, int(chapters_total)) + 1):
+        chapters.append(
+            {
+                "chapter_index": i,
+                "title": f"（模板）第{i}章",
+                "goal": "推进主线并制造选择与代价。",
+                "conflict": "外部阻力与内部动摇交织。",
+                "beats": ["推进事件", "制造冲突", "留钩子"],
+                "ending_hook": "留下下一章可承接的悬念。",
+            }
+        )
     state["screenwriter_result"] = {
         "main_arc": "（模板）主线：围绕核心冲突推进，并逐步揭示真相。",
         "themes": ["（模板）成长", "（模板）选择与代价"],
-        "chapters": [
-            {
-                "chapter_index": 1,
-                "title": "（模板）风起之时",
-                "goal": "主角被卷入事件，必须做出第一个选择。",
-                "conflict": "外部压迫与内部犹疑交织。",
-                "beats": ["进入新场景", "遭遇阻碍", "抛出钩子/伏笔"],
-                "ending_hook": "一个线索指向更大的幕后力量。",
-            }
-        ],
+        "chapters": chapters,
     }
     state["screenwriter_used_llm"] = False
     if logger:
