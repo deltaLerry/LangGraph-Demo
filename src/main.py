@@ -11,19 +11,29 @@ from state import StoryState
 from storage import (
     archive_run,
     apply_canon_suggestions,
+    apply_materials_suggestions,
     ensure_canon_files,
     ensure_memory_dirs,
+    ensure_materials_files,
     get_project_dir,
     get_max_chapter_memory_index,
     make_current_dir,
+    preview_materials_suggestions,
     preview_canon_suggestions,
     read_canon_suggestions_from_dir,
+    read_materials_suggestions_from_dir,
     read_json,
     write_json,
     write_text,
 )
 from agents.planner import planner_agent
 from agents.canon_init import canon_init_agent
+from agents.architect import architect_agent
+from agents.character_director import character_director_agent
+from agents.screenwriter import screenwriter_agent
+from agents.tone import tone_agent
+from agents.materials_aggregator import materials_aggregator_agent
+from agents.materials_init import materials_init_agent
 from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
@@ -75,6 +85,16 @@ def main():
         "--apply-canon-only",
         action="store_true",
         help="只应用当前 outputs/current 的 canon_suggestions（不运行生成流程）。用于你review后再执行。",
+    )
+    parser.add_argument(
+        "--apply-materials-suggestions",
+        action="store_true",
+        help="运行结束后，读取 outputs/current/chapters/*materials_update_suggestions.json 并在你确认后应用到 projects/<project>/materials（默认不自动应用）",
+    )
+    parser.add_argument(
+        "--apply-materials-only",
+        action="store_true",
+        help="只应用当前 outputs/current 的 materials_update_suggestions（不运行生成流程）。用于你review后再执行。",
     )
     parser.add_argument("--dry-run", action="store_true", help="只预览将要执行的变更，不实际写入（用于 apply-canon / archive 确认）")
     parser.add_argument("--yes", action="store_true", help="跳过所有确认（危险：会直接应用/归档）。适合自动化")
@@ -199,6 +219,32 @@ def main():
                 print(f"- {b}")
         return
 
+    # 只应用 Materials 建议（不生成）
+    if args.apply_materials_only:
+        current_dir = os.path.join(output_base, "current")
+        if not os.path.exists(current_dir):
+            raise FileNotFoundError(f"未找到尝试输出目录：{current_dir}（请先运行一次生成流程）")
+        meta = read_json(os.path.join(current_dir, "run_meta.json")) or {}
+        rel_project_dir = str(meta.get("project_dir") or "").strip()
+        if not rel_project_dir:
+            raise ValueError("outputs/current/run_meta.json 缺少 project_dir，无法定位项目 materials 目录")
+        project_dir = os.path.join(output_base, rel_project_dir.replace("/", os.sep))
+        ensure_materials_files(project_dir)
+        chapters_dir = os.path.join(current_dir, "chapters")
+        items = read_materials_suggestions_from_dir(chapters_dir)
+        print("\n=== Materials Suggestions Preview ===")
+        print(preview_materials_suggestions(items))
+        if not items:
+            print("\n（没有可应用的 materials_update_suggestions）")
+            return
+        stats = apply_materials_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
+        print(f"\n已处理 Materials 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
+        if stats.get("backups"):
+            print("已生成备份：")
+            for b in stats["backups"]:
+                print(f"- {b}")
+        return
+
     # “尝试目录”：只保留一个 current，每次覆盖写入
     current_dir = make_current_dir(output_base)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -287,6 +333,7 @@ def main():
 
     ensure_canon_files(project_dir)
     mem_dirs = ensure_memory_dirs(project_dir)
+    ensure_materials_files(project_dir)
     planned_state["project_dir"] = project_dir
 
     # 阶段2.2：初始化 Canon（仅在占位时写入，避免覆盖人工维护）
@@ -294,6 +341,15 @@ def main():
     planned_state["stage"] = settings.stage
     planned_state["memory_recent_k"] = int(settings.memory_recent_k)
     planned_state = canon_init_agent(planned_state)
+
+    # 阶段3：多角色材料包（先串行，稳定后再升级为 LangGraph 并行分支）
+    planned_state = architect_agent(planned_state)
+    planned_state = character_director_agent(planned_state)
+    planned_state = screenwriter_agent(planned_state)
+    planned_state = tone_agent(planned_state)
+    planned_state = materials_aggregator_agent(planned_state)
+    # 阶段3：materials_init（同步会议）——仅在项目 materials 为空/占位时初始化（受 Canon 硬约束）
+    planned_state = materials_init_agent(planned_state)
 
     # 持久化项目元信息（用于 resume）
     write_json(
@@ -311,6 +367,20 @@ def main():
 
     # 落盘策划结果
     write_json(os.path.join(current_dir, "planner.json"), planner_result if isinstance(planner_result, dict) else {})
+
+    # 落盘阶段3材料包（outputs/current/materials）
+    materials_dir_current = os.path.join(current_dir, "materials")
+    os.makedirs(materials_dir_current, exist_ok=True)
+    if isinstance(planned_state.get("architect_result"), dict) and planned_state.get("architect_result"):
+        write_json(os.path.join(materials_dir_current, "world.json"), planned_state.get("architect_result") or {})
+    if isinstance(planned_state.get("character_director_result"), dict) and planned_state.get("character_director_result"):
+        write_json(os.path.join(materials_dir_current, "characters.json"), planned_state.get("character_director_result") or {})
+    if isinstance(planned_state.get("screenwriter_result"), dict) and planned_state.get("screenwriter_result"):
+        write_json(os.path.join(materials_dir_current, "outline.json"), planned_state.get("screenwriter_result") or {})
+    if isinstance(planned_state.get("tone_result"), dict) and planned_state.get("tone_result"):
+        write_json(os.path.join(materials_dir_current, "tone.json"), planned_state.get("tone_result") or {})
+    if isinstance(planned_state.get("materials_bundle"), dict) and planned_state.get("materials_bundle"):
+        write_json(os.path.join(materials_dir_current, "materials_bundle.json"), planned_state.get("materials_bundle") or {})
     write_json(
         os.path.join(current_dir, "run_meta.json"),
         {
@@ -358,6 +428,8 @@ def main():
             "editor_used_llm": False,
             "chapter_memory": {},
             "memory_used_llm": False,
+            "materials_update_used": False,
+            "materials_update_suggestions": [],
             "project_dir": project_dir,
             "stage": settings.stage,
             "memory_recent_k": int(settings.memory_recent_k),
@@ -382,6 +454,7 @@ def main():
         editor_report = final_state.get("editor_report") or {}
         canon_suggestions = final_state.get("canon_suggestions") or []
         canon_update_suggestions = final_state.get("canon_update_suggestions") or []
+        materials_update_suggestions = final_state.get("materials_update_suggestions") or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
@@ -401,6 +474,13 @@ def main():
             write_json(
                 os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"),
                 {"items": canon_update_suggestions},
+            )
+
+        # 结构化落盘：materials_update_suggestions（复盘会议对“计划类材料”的更新建议；默认不自动应用）
+        if isinstance(materials_update_suggestions, list) and materials_update_suggestions:
+            write_json(
+                os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"),
+                {"items": materials_update_suggestions},
             )
 
         # chapter memory：写入 current + 持久化 projects
@@ -443,6 +523,22 @@ def main():
                     print(f"- {b}")
         else:
             print("（没有可应用的 canon_suggestions）")
+
+    # 1.5) 可选：应用 Materials 建议（用户确认点）
+    if args.apply_materials_suggestions:
+        chapters_dir = os.path.join(current_dir, "chapters")
+        items = read_materials_suggestions_from_dir(chapters_dir)
+        print("\n=== Materials Suggestions Preview ===")
+        print(preview_materials_suggestions(items))
+        if items:
+            stats = apply_materials_suggestions(project_dir=project_dir, items=items, yes=bool(args.yes), dry_run=bool(args.dry_run))
+            print(f"已处理 Materials 建议：applied={stats.get('applied')} skipped={stats.get('skipped')}")
+            if stats.get("backups"):
+                print("已生成备份：")
+                for b in stats["backups"]:
+                    print(f"- {b}")
+        else:
+            print("（没有可应用的 materials_update_suggestions）")
 
     # 2) 可选：归档（用户确认点 #2）
     if args.archive:

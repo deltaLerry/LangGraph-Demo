@@ -48,3 +48,24 @@ class StoryState(TypedDict, total=False):
     chapter_memory: Dict[str, Any]
     memory_used_llm: bool
 
+    # === 阶段3：多角色并行材料（run级别产出，供后续章节写作/审核注入） ===
+    architect_result: Dict[str, Any]         # 世界观/规则/势力/地点（结构化）
+    character_director_result: Dict[str, Any] # 人物卡（结构化）
+    screenwriter_result: Dict[str, Any]      # 主线+章节细纲（结构化）
+    tone_result: Dict[str, Any]              # 开篇基调/文风约束（结构化）
+
+    # 汇总后的“材料包”（写手只读这一份，避免上游多源拼 prompt）
+    materials_bundle: Dict[str, Any]
+    materials_used_llm: bool
+
+    # （可选）便于 debug/追溯：各专家是否使用了 LLM
+    architect_used_llm: bool
+    character_director_used_llm: bool
+    screenwriter_used_llm: bool
+    tone_used_llm: bool
+
+    # === 阶段3：材料复盘会议（materials_update） ===
+    # 说明：update 默认不直接写 materials/canon，只产出建议，走“预览→确认→应用”
+    materials_update_used: bool
+    materials_update_suggestions: List[Dict[str, Any]]
+

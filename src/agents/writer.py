@@ -6,6 +6,7 @@ from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
 from llm_meta import extract_finish_reason_and_usage
+from materials import materials_prompt_digest
 
 def writer_agent(state: StoryState) -> StoryState:
     """
@@ -77,6 +78,12 @@ def writer_agent(state: StoryState) -> StoryState:
         style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
+        # === 2.0：阶段3材料包（优先于 planner 参考，用于“本章细纲/人物卡/基调”硬约束） ===
+        materials_bundle = state.get("materials_bundle") or {}
+        materials_text = ""
+        if isinstance(materials_bundle, dict) and materials_bundle:
+            materials_text = materials_prompt_digest(materials_bundle, chapter_index=chapter_index)
+
         # === 2.1.1：会议同步摘要（把“主编验收清单/硬约束”同步给写手，提升一次过） ===
         def _canon_names() -> str:
             try:
@@ -133,6 +140,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "要求：逻辑自洽、避免AI腔、句式多样、节奏紧凑。\n"
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
                     "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要额外说明。"
@@ -145,7 +153,12 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
                     f"{sync_digest}\n"
-                    "【Canon 设定（必须遵守）】\n"
+                    + (
+                        ("【阶段3材料包（必须遵循；如与 Canon 冲突以 Canon 为准）】\n" + materials_text + "\n\n")
+                        if materials_text
+                        else ""
+                    )
+                    + "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
                     f"{style_text}\n\n"
@@ -164,6 +177,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "要求：中文；自然流畅；有冲突与钩子；避免AI感。\n"
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
+                    "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
                     "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要标题以外的任何说明。"
@@ -176,7 +190,12 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"点子：{idea}\n"
                     f"开篇基调提示：{opening_task}\n\n"
                     f"{sync_digest}\n"
-                    "【Canon 设定（必须遵守）】\n"
+                    + (
+                        ("【阶段3材料包（必须遵循；如与 Canon 冲突以 Canon 为准）】\n" + materials_text + "\n\n")
+                        if materials_text
+                        else ""
+                    )
+                    + "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
                     f"{style_text}\n\n"

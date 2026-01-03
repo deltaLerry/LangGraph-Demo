@@ -9,6 +9,7 @@ from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
+from materials import materials_prompt_digest
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -82,14 +83,21 @@ def editor_agent(state: StoryState) -> StoryState:
         style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
+        # === 2.0：阶段3材料包（用于主编审核对照：本章细纲/人物卡/基调） ===
+        materials_bundle = state.get("materials_bundle") or {}
+        materials_text = ""
+        if isinstance(materials_bundle, dict) and materials_bundle:
+            materials_text = materials_prompt_digest(materials_bundle, chapter_index=chapter_index)
+
         system = SystemMessage(
             content=(
                 "你是苛刻的编辑部主编，负责最终稿件质量拍板。\n"
                 "你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown、不要多余文字）。\n"
                 "一致性优先级：\n"
                 "1) 先对照 Canon 设定（world/characters/timeline/style），这是“真值来源”\n"
-                "2) 再对照最近章节记忆（用于情节连续性）\n"
-                "3) planner 任务仅作参考（不可覆盖 Canon）\n"
+                "2) 若提供了阶段3【材料包】（含人物卡/本章细纲/基调），用于补充约束；但不得覆盖 Canon\n"
+                "3) 再对照最近章节记忆（用于情节连续性）\n"
+                "4) planner 任务仅作参考（不可覆盖 Canon）\n"
                 "裁决原则（用于提升通过率，减少无谓返工）：\n"
                 "- 仅在出现“明确矛盾/硬性违背 Canon / 严重逻辑错误 / 严重可读性问题 / 明显违背文风或字数硬约束”时判定为 审核不通过。\n"
                 "- 不要因为 Canon 目前不完整/缺少条目 就直接判定不通过；如果只是缺设定，请尽量让正文用模糊表达通过，不要强行要求补全大全。\n"
@@ -124,7 +132,12 @@ def editor_agent(state: StoryState) -> StoryState:
                 f"{canon_text}\n\n"
                 "【文风约束】\n"
                 f"{style_text}\n\n"
-                "【最近章节记忆（参考）】\n"
+                + (
+                    ("【阶段3材料包（若提供则用于对照本章细纲/人物卡/基调；不得覆盖 Canon）】\n" + materials_text + "\n\n")
+                    if materials_text
+                    else ""
+                )
+                + "【最近章节记忆（参考）】\n"
                 f"{memories_text}\n\n"
                 "正文：\n"
                 f"{writer_result}\n"

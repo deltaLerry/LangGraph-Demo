@@ -149,6 +149,39 @@ def ensure_memory_dirs(project_dir: str) -> Dict[str, str]:
     return {"memory_root": mem_root, "chapters_dir": chapters_dir, "arcs_dir": arcs_dir}
 
 
+def ensure_materials_files(project_dir: str) -> Dict[str, str]:
+    """
+    初始化“计划类材料”目录（阶段3）：只创建缺失文件，不覆盖已有内容。
+    位置：projects/<project>/materials/
+    """
+    mdir = os.path.join(project_dir, "materials")
+    os.makedirs(mdir, exist_ok=True)
+    paths = {
+        "outline": os.path.join(mdir, "outline.json"),
+        "tone": os.path.join(mdir, "tone.json"),
+    }
+    if not os.path.exists(paths["outline"]):
+        write_json(paths["outline"], {"main_arc": "", "themes": [], "chapters": [], "notes": ""})
+    if not os.path.exists(paths["tone"]):
+        write_json(
+            paths["tone"],
+            {"narration": "", "pacing": "", "reference_style": "", "style_constraints": [], "avoid": [], "notes": ""},
+        )
+    return paths
+
+
+def load_materials_bundle(project_dir: str) -> Dict[str, Any]:
+    """
+    读取项目 materials（outline/tone），用于写作/复盘注入。
+    注意：这是“计划类材料”，真值仍以 Canon 为准。
+    """
+    mdir = os.path.join(project_dir, "materials")
+    return {
+        "outline": read_json(os.path.join(mdir, "outline.json")) or {},
+        "tone": read_json(os.path.join(mdir, "tone.json")) or {},
+    }
+
+
 def load_canon_bundle(project_dir: str) -> Dict[str, Any]:
     """
     读取 Canon 四件套（world/characters/timeline/style），用于写作/审核注入。
@@ -321,6 +354,251 @@ def read_canon_suggestions_from_dir(chapters_dir: str) -> List[Dict[str, Any]]:
             if isinstance(it, dict):
                 out.append(it)
     return out
+
+
+def read_materials_suggestions_from_dir(chapters_dir: str) -> List[Dict[str, Any]]:
+    """
+    读取 chapters/*materials_update_suggestions.json 并汇总为 list。
+    约定：文件格式为 {"items":[...]}。
+    """
+    out: List[Dict[str, Any]] = []
+    if not chapters_dir or not os.path.exists(chapters_dir):
+        return out
+    for name in os.listdir(chapters_dir):
+        if not name.endswith(".materials_update_suggestions.json"):
+            continue
+        p = os.path.join(chapters_dir, name)
+        obj = read_json(p) or {}
+        items = obj.get("items") if isinstance(obj.get("items"), list) else []
+        for it in items:
+            if isinstance(it, dict):
+                out.append(it)
+    return out
+
+
+def preview_materials_suggestions(items: List[Dict[str, Any]]) -> str:
+    if not items:
+        return "（无）"
+    lines: List[str] = []
+    for i, it in enumerate(items, start=1):
+        mp = it.get("materials_patch") if isinstance(it.get("materials_patch"), dict) else {}
+        target = str(mp.get("target", "") or "N/A")
+        op = str(mp.get("op", "") or "N/A")
+        path = str(mp.get("path", "") or "N/A")
+        issue = str(it.get("issue", "") or "").strip()
+        lines.append(f"[{i}] target={target} op={op} path={path}")
+        if issue:
+            lines.append(f"    issue: {issue}")
+    return "\n".join(lines).rstrip()
+
+
+def apply_materials_suggestions(
+    *,
+    project_dir: str,
+    items: List[Dict[str, Any]],
+    yes: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    将 materials_update_suggestions 写回 projects/<project>/materials（计划类材料）。
+    安全原则：本函数**只能写 materials 目录**，不允许触碰 Canon。
+
+    支持：
+    - target=outline.json：op=note(path=notes) / op=append(path=chapters, value=chapter dict 或 list；按 chapter_index upsert)
+    - target=tone.json：op=note(path=notes) / op=append(path=style_constraints|avoid, value=str 或 list；幂等追加)
+    """
+    mdir = os.path.join(project_dir, "materials")
+    outline_path = os.path.join(mdir, "outline.json")
+    tone_path = os.path.join(mdir, "tone.json")
+    ensure_materials_files(project_dir)
+
+    stats = {"applied": 0, "skipped": 0, "backups": []}  # type: ignore[dict-item]
+
+    def _backup(path: str) -> str:
+        if not os.path.exists(path):
+            return ""
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        bak = f"{path}.bak.{ts}"
+        shutil.copy2(path, bak)
+        return bak
+
+    def _append_unique(arr: List[Any], v: Any) -> None:
+        if v is None:
+            return
+        if isinstance(v, list):
+            for x in v:
+                _append_unique(arr, x)
+            return
+        if v not in arr:
+            arr.append(v)
+
+    # 复用 canon 的保守合并能力（人物/规则等 upsert 逻辑）
+    def _is_empty(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            return (s == "") or (s in ("N/A", "n/a", "待补充", "（待补充）", "（待明确）", "待明确", "未知"))
+        if isinstance(v, (list, tuple, dict, set)):
+            return len(v) == 0
+        return False
+
+    def _deep_merge_keep_old_on_empty(old: Any, new: Any) -> Any:
+        if _is_empty(new):
+            return old
+        if isinstance(old, dict) and isinstance(new, dict):
+            out = dict(old)
+            for k, nv in new.items():
+                ov = out.get(k)
+                if isinstance(ov, dict) and isinstance(nv, dict):
+                    out[k] = _deep_merge_keep_old_on_empty(ov, nv)
+                elif isinstance(ov, list) and isinstance(nv, list):
+                    out[k] = nv if nv else ov
+                else:
+                    out[k] = nv if not _is_empty(nv) else ov
+            return out
+        if isinstance(old, list) and isinstance(new, list):
+            return new if new else old
+        return new
+
+    def _upsert_by_key(arr: List[Any], item: Any, *, key_fields: Tuple[str, ...]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        for k in key_fields:
+            if k not in item or _is_empty(item.get(k)):
+                return False
+        for i, cur in enumerate(arr):
+            if not isinstance(cur, dict):
+                continue
+            ok = True
+            for k in key_fields:
+                if cur.get(k) != item.get(k):
+                    ok = False
+                    break
+            if not ok:
+                continue
+            arr[i] = _deep_merge_keep_old_on_empty(cur, item)
+            return True
+        arr.append(item)
+        return True
+
+    apply_all = bool(yes)
+    quit_all = False
+    for idx, it in enumerate(items, start=1):
+        if quit_all:
+            stats["skipped"] += 1
+            continue
+        mp = it.get("materials_patch") if isinstance(it.get("materials_patch"), dict) else {}
+        target = str(mp.get("target", "") or "").strip()
+        op = str(mp.get("op", "") or "").strip()
+        path = str(mp.get("path", "") or "").strip()
+        value = mp.get("value", None)
+
+        if not target or target == "N/A":
+            stats["skipped"] += 1
+            continue
+
+        action = "apply" if apply_all else "ask"
+        if action == "ask":
+            while True:
+                print(f"\n[{idx}/{len(items)}] target={target} op={op} path={path}")
+                ans = input("选择：y(应用) s(跳过) a(全部应用) q(退出) > ").strip().lower()
+                if ans in ("a", "all"):
+                    apply_all = True
+                    action = "apply"
+                    break
+                if ans in ("q", "quit", "exit"):
+                    quit_all = True
+                    action = "skip"
+                    break
+                if ans in ("s", "skip", "n", "no", ""):
+                    action = "skip"
+                    break
+                if ans in ("y", "yes", "是", "确认"):
+                    action = "apply"
+                    break
+                print("未识别指令。")
+
+        if quit_all:
+            stats["skipped"] += 1
+            continue
+        if action == "skip":
+            stats["skipped"] += 1
+            continue
+
+        if dry_run:
+            stats["applied"] += 1
+            continue
+
+        if target == "outline.json":
+            obj = read_json(outline_path) or {}
+            bak = _backup(outline_path)
+            if bak:
+                stats["backups"].append(bak)
+            if op == "note":
+                if (path or "notes") != "notes":
+                    stats["skipped"] += 1
+                    continue
+                line = str(value if value is not None else "").strip()
+                if not line:
+                    stats["skipped"] += 1
+                    continue
+                prev = str(obj.get("notes", "") or "")
+                if line not in prev:
+                    obj["notes"] = (prev.rstrip() + ("\n" if prev.strip() else "") + line).strip()
+            elif op == "append" and path == "chapters":
+                arr = obj.get("chapters")
+                if not isinstance(arr, list):
+                    obj["chapters"] = []
+                    arr = obj["chapters"]
+                vals = value if isinstance(value, list) else [value]
+                for v in vals:
+                    if v is None:
+                        continue
+                    # chapters 以 chapter_index upsert
+                    if _upsert_by_key(arr, v, key_fields=("chapter_index",)):
+                        continue
+                    if v not in arr:
+                        arr.append(v)
+            else:
+                stats["skipped"] += 1
+                continue
+            write_json(outline_path, obj)
+            stats["applied"] += 1
+            continue
+
+        if target == "tone.json":
+            obj = read_json(tone_path) or {}
+            bak = _backup(tone_path)
+            if bak:
+                stats["backups"].append(bak)
+            if op == "note":
+                if (path or "notes") != "notes":
+                    stats["skipped"] += 1
+                    continue
+                line = str(value if value is not None else "").strip()
+                if not line:
+                    stats["skipped"] += 1
+                    continue
+                prev = str(obj.get("notes", "") or "")
+                if line not in prev:
+                    obj["notes"] = (prev.rstrip() + ("\n" if prev.strip() else "") + line).strip()
+            elif op == "append" and path in ("style_constraints", "avoid"):
+                arr = obj.get(path)
+                if not isinstance(arr, list):
+                    obj[path] = []
+                    arr = obj[path]
+                _append_unique(arr, value)
+            else:
+                stats["skipped"] += 1
+                continue
+            write_json(tone_path, obj)
+            stats["applied"] += 1
+            continue
+
+        stats["skipped"] += 1
+
+    return stats
 
 
 def preview_canon_suggestions(items: List[Dict[str, Any]]) -> str:
