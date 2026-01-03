@@ -15,3 +15,6 @@ __pycache__/
 
 # output
 outputs/
+
+# output的生成文件
+test-idea.*
