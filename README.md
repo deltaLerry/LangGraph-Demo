@@ -172,6 +172,10 @@ python src\main.py --config config.toml
 - **LLM 已配置**：推荐用 `.env` 或 `config.toml` 的 `[llm]`（示例见本文上方“最小配置示例”）。
 - **点子包文件**：推荐按 `examples/idea_pack_example.txt` 的格式写（可含项目名/文风/段落规则/点子）。
 
+推荐直接拷贝本仓库提供的长跑模板（职责分离）：
+- `examples/config_150x5000.toml`：只放生成/稳定性/记忆/沉淀等**非敏感参数**
+- `examples/env_150x5000.example`：只放 **LLM_*（含 API Key）**
+
 ### 推荐：无人值守批量生成（稳 + 可追溯 + 低风险自动沉淀）
 特点：
 - **默认不停机**：单章异常会落盘 `chapters/XXX.error.json` 并继续后续章节（避免长跑“全盘崩”）。
