@@ -184,13 +184,13 @@ python src\main.py --config config.toml
 PowerShell 示例（把路径/项目名改成你的）：
 
 ```bash
-python src\main.py \
+python main.py \
   --config "config.toml" \
   --llm-mode llm \
-  --idea-file "D:\path\to\idea_pack.txt" \
-  --project "你的项目名" \
-  --target-words 5000 \
-  --chapters 150 \
+  --idea-file "test-idea.md" \
+  --project "无限：规则怪谈" \
+  --target-words 4000 \
+  --chapters 10 \
   --max-rewrites 1 \
   --editor-min-issues 2 \
   --editor-retry-on-invalid 1 \

@@ -126,7 +126,26 @@ def main():
     parser.add_argument("--debug", action="store_true", help="开启debug日志（写入debug.jsonl与call_graph.md）")
     args = parser.parse_args()
 
-    config_abs = os.path.abspath(args.config)
+    # 统一相对路径解析基准：
+    # - 如果传入的 config（默认 config.toml）在 CWD 不存在，但在 repo 根目录存在，则使用 repo 根目录的 config
+    # - 这样无论从哪里运行（例如从 src/ 目录运行），outputs 也会稳定落在 repo 根目录下
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def _resolve_config_path(p: str) -> str:
+        p = (p or "").strip() or "config.toml"
+        if os.path.isabs(p):
+            return p
+        cand_cwd = os.path.abspath(p)
+        if os.path.exists(cand_cwd):
+            return cand_cwd
+        cand_repo = os.path.join(repo_root, p)
+        if os.path.exists(cand_repo):
+            return cand_repo
+        # 不存在时仍返回 CWD 下的绝对路径，便于后续报错信息一致
+        return cand_cwd
+
+    config_abs = _resolve_config_path(args.config)
+    config_dir = os.path.dirname(config_abs) if os.path.exists(config_abs) else repo_root
 
     # idea 支持从文件读取（优先级最高）
     idea_from_file: str | None = None
@@ -134,7 +153,7 @@ def main():
     if args.idea_file and args.idea_file.strip():
         idea_path = args.idea_file.strip()
         if not os.path.isabs(idea_path):
-            idea_path = os.path.join(os.path.dirname(config_abs), idea_path)
+            idea_path = os.path.join(config_dir, idea_path)
         if not os.path.exists(idea_path):
             raise FileNotFoundError(f"未找到 idea 文件：{idea_path}")
         # 支持 UTF-8 BOM
@@ -149,7 +168,7 @@ def main():
     if args.style_file and args.style_file.strip():
         style_path = args.style_file.strip()
         if not os.path.isabs(style_path):
-            style_path = os.path.join(os.path.dirname(config_abs), style_path)
+            style_path = os.path.join(config_dir, style_path)
         if not os.path.exists(style_path):
             raise FileNotFoundError(f"未找到 style 文件：{style_path}")
         with open(style_path, "r", encoding="utf-8-sig") as f:
@@ -158,7 +177,7 @@ def main():
             style_from_file = ""
 
     settings = load_settings(
-        args.config,
+        config_abs,
         idea=idea_from_file if idea_from_file is not None else args.idea,
         output_base=args.output_base,
         stage=args.stage,
@@ -196,10 +215,11 @@ def main():
             gen=settings.gen,
             llm=settings.llm,
         )
-    # output_base 若为相对路径，则相对 config.toml 所在目录解析（避免从 src/ 运行跑到 src/outputs）
+    # output_base 若为相对路径，则优先相对 config.toml 所在目录解析；若 config 不存在则相对 repo 根目录解析。
     output_base = settings.output_base
     if not os.path.isabs(output_base):
-        output_base = os.path.join(os.path.dirname(config_abs), output_base)
+        output_base = os.path.join(config_dir, output_base)
+    output_base = os.path.abspath(output_base)
     os.makedirs(output_base, exist_ok=True)
 
     if args.resume and not args.project.strip():
