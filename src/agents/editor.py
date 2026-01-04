@@ -64,6 +64,12 @@ def editor_agent(state: StoryState) -> StoryState:
         if logger:
             logger.event("node_start", node="editor", chapter_index=state.get("chapter_index", 1))
 
+        # === 审稿轮次策略：倒数第二次更严格给更多 issues；最后一次放宽提高通过率 ===
+        writer_version = int(state.get("writer_version", 1) or 1)
+        max_rewrites = int(state.get("max_rewrites", 1) or 1)
+        is_last_review = writer_version >= (1 + max_rewrites)
+        is_penultimate_review = (not is_last_review) and (writer_version == max_rewrites)
+
         # === 2.1：注入 Canon + 最近记忆（控制长度） ===
         chapter_index = int(state.get("chapter_index", 1))
         project_dir = str(state.get("project_dir", "") or "")
@@ -101,6 +107,17 @@ def editor_agent(state: StoryState) -> StoryState:
         if isinstance(materials_bundle, dict) and materials_bundle:
             materials_text = materials_prompt_digest(materials_bundle, chapter_index=chapter_index)
 
+        # editor 稳定性参数：同时用于要求一次性输出足够多 issues
+        editor_min_issues = max(0, int(state.get("editor_min_issues", 2) or 2))
+        retry_on_invalid = max(0, int(state.get("editor_retry_on_invalid", 1) or 1))
+        # 动态目标：倒数第二次尽量多提；最后一次更宽松（仅在拒稿时至少给出少量关键硬伤）
+        desired_min_issues = editor_min_issues
+        if is_penultimate_review:
+            desired_min_issues = max(desired_min_issues, 6)
+        if is_last_review:
+            # 最后一次：宁可通过；若必须拒稿也只需聚焦硬伤
+            desired_min_issues = max(0, min(desired_min_issues, 2))
+
         user_style = truncate_text(str(state.get("style_override", "") or "").strip(), max_chars=1200)
         paragraph_rules = truncate_text(str(state.get("paragraph_rules", "") or "").strip(), max_chars=800)
         system = SystemMessage(
@@ -126,7 +143,10 @@ def editor_agent(state: StoryState) -> StoryState:
                 "- 字数硬约束：明显偏离目标区间（过短导致情节不完整/过长导致拖沓）\n"
                 "\n"
                 "输出质量要求（避免无效审核）：\n"
-                "- decision=审核不通过 时，issues 至少 2 条（除非你能确信正文几乎无瑕疵且无硬伤）。\n"
+                f"- 本次审稿轮次：writer_version={writer_version} / max_rewrites={max_rewrites}。\n"
+                + ("- 这是倒数第二次审稿：请尽可能多给出 issues（建议 6~12 条），把所有会导致下次返工的风险一次性指出。\n" if is_penultimate_review else "")
+                + ("- 这是最后一次审稿：请适当放宽标准以提高通过率。只有命中“硬伤”才拒稿；若仅是轻微措辞/润色/可接受的小瑕疵，请直接判定为 审核通过。\n" if is_last_review else "")
+                + f"- decision=审核不通过 时，issues 至少 {max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)} 条（每条必须可执行且包含 quote）。\n"
                 "- 每条 issue 必须“具体可执行”：指出哪里错 + 为什么错 + 怎么改（改法要能直接照做）。\n"
                 "- 每条 issue 必须包含 quote：从正文原样复制一小段，能定位到问题。\n"
                 "- 若你找不到可引用 quote，就不要输出该条（宁可少而准）。\n"
@@ -218,9 +238,6 @@ def editor_agent(state: StoryState) -> StoryState:
             )
         # === 解析与稳定性：不再让“JSON输出不合规”直接崩溃整条流水线 ===
         # 目标：让系统可持续产出（即使主编输出格式偶发异常），并为后续排障保留日志/上下文。
-        editor_min_issues = max(0, int(state.get("editor_min_issues", 2) or 2))
-        retry_on_invalid = max(0, int(state.get("editor_retry_on_invalid", 1) or 1))
-
         def _parse_report(t: str) -> tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
             rep = _extract_first_json_obj(t) or {}
             dec = str(rep.get("decision", "") or "").strip()
@@ -234,7 +251,7 @@ def editor_agent(state: StoryState) -> StoryState:
         invalid = decision not in ("审核通过", "审核不通过")
         if invalid:
             need_retry = True
-        if (not invalid) and decision == "审核不通过" and editor_min_issues > 0 and len(issues_list) < editor_min_issues:
+        if (not invalid) and decision == "审核不通过" and desired_min_issues > 0 and len(issues_list) < desired_min_issues:
             need_retry = True
 
         # 可选二次重试：让 LLM “修复 JSON / 补齐 issues”，提升一次过审与稳定性
@@ -246,7 +263,7 @@ def editor_agent(state: StoryState) -> StoryState:
                         "必须且仅输出 JSON（不要解释/不要 markdown）。\n"
                         "要求：\n"
                         f"- decision 必须是 审核通过 或 审核不通过\n"
-                        f"- 若 decision=审核不通过，issues 至少 {editor_min_issues} 条（每条必须有 quote/issue/fix/action）\n"
+                        f"- 若 decision=审核不通过，issues 至少 {max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)} 条（每条必须有 quote/issue/fix/action）\n"
                     )
                 )
                 fix_human = HumanMessage(
@@ -286,17 +303,32 @@ def editor_agent(state: StoryState) -> StoryState:
         # 最终兜底：仍然不合法就降级为“审核不通过 + 结构化最小问题”，避免整次运行退出
         if decision not in ("审核通过", "审核不通过"):
             decision = "审核不通过"
+            quote0 = truncate_text(str(writer_result or ""), max_chars=160)
+            need_n = max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)
             issues_list = [
                 {
                     "type": "readability",
                     "canon_key": "N/A",
-                    "quote": "",
-                    "issue": "主编输出格式不合法（未能解析为符合 schema 的 JSON）。请主编重新给出严格 JSON 报告。",
-                    "fix": "严格按 schema 输出 decision 与 issues；decision=审核不通过 时给出至少2条可执行 issue，并包含 quote。",
+                    "quote": quote0,
+                    "issue": "主编输出格式不合法（未能解析为符合 schema 的 JSON）。",
+                    "fix": "主编需严格按 schema 只输出 JSON；拒稿时给出多条可执行 issue（每条包含 quote/issue/fix/action）。",
                     "action": "rewrite",
                     "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
                 }
             ]
+            while len(issues_list) < need_n:
+                k2 = len(issues_list) + 1
+                issues_list.append(
+                    {
+                        "type": "readability",
+                        "canon_key": "N/A",
+                        "quote": quote0,
+                        "issue": f"审稿输出不可用（占位补齐 #{k2}）：需要补充具体问题。",
+                        "fix": "补充一条带 quote 的具体问题与改法（可从：逻辑因果/人物动机/细纲对齐/节奏拖沓/重复句式/设定灌输 等维度选）。",
+                        "action": "rewrite",
+                        "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
+                    }
+                )
             report = {"decision": decision, "issues": issues_list}
 
         state["editor_report"] = {"decision": decision, "issues": issues_list}

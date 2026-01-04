@@ -157,6 +157,42 @@ def writer_agent(state: StoryState) -> StoryState:
         if paragraph_rules:
             sync_digest += "\n【段落/结构约束（尽量遵守）】\n" + truncate_text(paragraph_rules, max_chars=800) + "\n"
 
+        # === 2.1.2：结构化审稿意见（优先使用 editor_report.issues） ===
+        def _structured_editor_issues_digest() -> str:
+            rep = state.get("editor_report")
+            if not isinstance(rep, dict):
+                return ""
+            issues0 = rep.get("issues")
+            if not isinstance(issues0, list) or not issues0:
+                return ""
+            lines: list[str] = []
+            for i, it in enumerate(issues0, start=1):
+                if not isinstance(it, dict):
+                    continue
+                t = str(it.get("type", "") or "").strip() or "N/A"
+                canon_key = str(it.get("canon_key", "") or "").strip() or "N/A"
+                quote = str(it.get("quote", "") or "").strip()
+                issue = str(it.get("issue", "") or "").strip()
+                fix = str(it.get("fix", "") or "").strip()
+                action = str(it.get("action", "") or "").strip() or "rewrite"
+                if not issue and not fix and not quote:
+                    continue
+                lines.append(f"### Issue {i}（{t} / action={action} / canon_key={canon_key}）")
+                if quote:
+                    lines.append("【证据（quote）】")
+                    lines.append(quote)
+                if issue:
+                    lines.append("【问题】")
+                    lines.append(issue)
+                if fix:
+                    lines.append("【改法】")
+                    lines.append(fix)
+                lines.append("")  # 分隔
+            s = "\n".join(lines).strip()
+            return truncate_text(s, max_chars=4500)
+
+        structured_issues_text = _structured_editor_issues_digest()
+
         if is_rewrite:
             system = SystemMessage(
                 content=(
@@ -168,6 +204,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     "命名纪律（长跑一致性关键）：除非 Canon/材料包/已知专有名词清单里已有，否则不要新增门派/功法/地名/组织/物品等专有名词；必须引入新概念时，用模糊描述，不要起新名字。\n"
                     "长章结构（面向可交付）：用“场景推进”写作，每个场景必须有冲突/信息/选择的推进；结尾必须有可承接的钩子。\n"
                     "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
+                    "执行要求：必须逐条修复【结构化审稿意见】中的每一条 issue；如果某条无法直接修复，需用改写方式规避其触发条件（但最终仍需满足 Canon/材料包）。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要额外说明。"
                 )
@@ -185,14 +222,16 @@ def writer_agent(state: StoryState) -> StoryState:
                         else ""
                     )
                     + "【Canon 设定（必须遵守）】\n"
-                    f"{canon_text}\n\n"
+                    + f"{canon_text}\n\n"
                     + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
                     + "【最近章节记忆（参考，避免矛盾）】\n"
-                    f"{memories_text}\n\n"
-                    + "主编修改意见：\n"
-                    + "\n".join([f"- {x}" for x in feedback])
-                    + "\n\n"
-                    "请给出重写后的完整正文："
+                    + f"{memories_text}\n\n"
+                    + (
+                        ("【结构化审稿意见（逐条修复；优先）】\n" + structured_issues_text + "\n\n")
+                        if structured_issues_text
+                        else ("主编修改意见：\n" + "\n".join([f"- {x}" for x in feedback]) + "\n\n")
+                    )
+                    + "请给出重写后的完整正文："
                 )
             )
         else:
