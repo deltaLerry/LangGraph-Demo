@@ -36,7 +36,7 @@ def _check_canon(errors: List[str], project_dir: str) -> None:
     world_path = os.path.join(canon_dir, "world.json")
     chars_path = os.path.join(canon_dir, "characters.json")
     timeline_path = os.path.join(canon_dir, "timeline.json")
-    style_path = os.path.join(canon_dir, "style.md")
+    # style.md 已废弃：文风由“材料包（tone）”驱动；此处不再强制要求 canon/style.md
 
     if _must_exists(errors, world_path, "canon/world.json"):
         w = _read_json_dict(errors, world_path, "canon/world.json")
@@ -62,10 +62,7 @@ def _check_canon(errors: List[str], project_dir: str) -> None:
             if not isinstance(arr, list):
                 _fail(errors, "canon/timeline.json 字段 events 应为 list")
 
-    if _must_exists(errors, style_path, "canon/style.md"):
-        style = read_text_if_exists(style_path)
-        if not style.strip():
-            _fail(errors, "canon/style.md 为空（建议至少保留默认模板）")
+    # 不再检查 canon/style.md
 
     mem_dir = os.path.join(project_dir, "memory", "chapters")
     _must_exists(errors, mem_dir, "project memory/chapters 目录")

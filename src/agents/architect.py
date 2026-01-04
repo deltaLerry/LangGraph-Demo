@@ -25,6 +25,8 @@ def architect_agent(state: StoryState) -> StoryState:
         logger.event("node_start", node="architect", chapter_index=0)
 
     idea = str(state.get("user_input", "") or "")
+    chapters_total = int(state.get("chapters_total", 1) or 1)
+    target_words = int(state.get("target_words", 800) or 800)
     planner_result = state.get("planner_result") or {}
     project_name = ""
     try:
@@ -95,12 +97,15 @@ def architect_agent(state: StoryState) -> StoryState:
                 "要求：\n"
                 "- rules/factions/places 每类 3~8 条，尽量具体可用于写作约束。\n"
                 "- notes 用于补充“世界规则/禁忌/核心冲突”的一句话摘要。\n"
+                f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请按规模控制设定密度：长篇需留出可扩展空间与多阶段冲突升级。\n"
             )
         )
         human = HumanMessage(
             content=(
                 f"项目：{project_name}\n"
                 f"点子：{idea}\n"
+                f"章节数：{chapters_total}\n"
+                f"每章目标字数：{target_words}\n"
                 + (f"\n策划任务书（世界观设定）：\n{instr}\n" if instr else "")
             )
         )

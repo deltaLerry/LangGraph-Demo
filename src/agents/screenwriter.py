@@ -27,6 +27,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
 
     idea = str(state.get("user_input", "") or "")
     chapters_total = int(state.get("chapters_total", 1) or 1)
+    target_words = int(state.get("target_words", 800) or 800)
     planner_result = state.get("planner_result") or {}
     project_name = str((planner_result or {}).get("项目名称", "") or "")
 
@@ -110,6 +111,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 "要求：\n"
                 f"- chapters 必须包含 1..{chapters_total} 每一章（chapter_index 从 1 开始连续）。\n"
                 "- 每章 beats 3~6 条，强调可写作的行动/冲突/信息揭露，不要百科式设定说明。\n"
+                f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请据此统一节奏：长篇要留足伏笔与层层升级，不要在前几章把底牌全掀完。\n"
                 "- 必须遵守 Canon（若 Canon 不完整，用模糊表达，不要强行新增硬设定名词）。\n"
             )
         )
@@ -118,6 +120,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 f"项目：{project_name}\n"
                 f"点子：{idea}\n"
                 f"章节数：{chapters_total}\n"
+                f"每章目标字数：{target_words}\n"
                 + (f"\n策划任务书（主线脉络）：\n{instr}\n" if instr else "")
                 + "\n【Canon（真值来源）】\n"
                 + f"{canon_text}\n"

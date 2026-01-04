@@ -26,6 +26,8 @@ def character_director_agent(state: StoryState) -> StoryState:
         logger.event("node_start", node="character_director", chapter_index=0)
 
     idea = str(state.get("user_input", "") or "")
+    chapters_total = int(state.get("chapters_total", 1) or 1)
+    target_words = int(state.get("target_words", 800) or 800)
     planner_result = state.get("planner_result") or {}
     project_name = str((planner_result or {}).get("项目名称", "") or "")
 
@@ -105,12 +107,15 @@ def character_director_agent(state: StoryState) -> StoryState:
                 "要求：\n"
                 "- 产出 3~6 个主要人物；每个角色必须有明确动机 + 1~3 个禁忌（便于写作一致性约束）。\n"
                 "- 若 Canon 已存在角色（同名），请只做“补全/增量”，不要改名、不要推翻既有条目。\n"
+                f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请按规模设计人物弧线：核心人物至少有 2~3 个阶段性变化点，且能支撑长期冲突推进。\n"
             )
         )
         human = HumanMessage(
             content=(
                 f"项目：{project_name}\n"
                 f"点子：{idea}\n"
+                f"章节数：{chapters_total}\n"
+                f"每章目标字数：{target_words}\n"
                 + (f"\n策划任务书（核心角色）：\n{instr}\n" if instr else "")
                 + "\n【Canon人物卡（真值来源，若存在需遵守/补全）】\n"
                 + f"{canon_chars_text}\n"

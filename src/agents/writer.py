@@ -94,7 +94,6 @@ def writer_agent(state: StoryState) -> StoryState:
             ),
             max_chars=6000,
         )
-        style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
         # === 2.0：阶段3材料包（优先于 planner 参考，用于“本章细纲/人物卡/基调”硬约束） ===
@@ -149,7 +148,7 @@ def writer_agent(state: StoryState) -> StoryState:
             "- 设定：只使用 Canon 中已出现的专有名词/势力/地点/能力名；如必须引入新概念，用模糊描述，不要起新名字。\n"
             "- 一致性：人物动机/能力/时间线不要前后打架；不要出现‘上一段说A，下一段又说非A’。\n"
             "- 信息揭露：避免大段设定说明（百科式讲解）；设定通过行动/冲突/对话自然露出。\n"
-            "- 风格：遵守 style.md；避免 AI 总结句、机械重复。\n"
+            "- 风格：以【材料包.tone】为主（style_constraints/avoid）；避免 AI 总结句、机械重复。\n"
             "\n【Canon 已知专有名词（尽量只用这些）】\n"
             f"{_canon_names()}\n"
         )
@@ -187,8 +186,6 @@ def writer_agent(state: StoryState) -> StoryState:
                     )
                     + "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
-                    "【文风约束（必须遵守）】\n"
-                    f"{style_text}\n\n"
                     + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
                     + "【最近章节记忆（参考，避免矛盾）】\n"
                     f"{memories_text}\n\n"
@@ -227,8 +224,6 @@ def writer_agent(state: StoryState) -> StoryState:
                     )
                     + "【Canon 设定（必须遵守）】\n"
                     f"{canon_text}\n\n"
-                    "【文风约束（必须遵守）】\n"
-                    f"{style_text}\n\n"
                     + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
                     + "【最近章节记忆（参考，避免矛盾）】\n"
                     f"{memories_text}\n\n"

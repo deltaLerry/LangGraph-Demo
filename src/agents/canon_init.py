@@ -79,6 +79,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
     world_path = os.path.join(canon_dir, "world.json")
     characters_path = os.path.join(canon_dir, "characters.json")
     timeline_path = os.path.join(canon_dir, "timeline.json")
+    # style.md 不在此处兜底生成：必须来自用户输入（由主流程负责创建/校验）
     style_path = os.path.join(canon_dir, "style.md")
 
     existing_world = read_json(world_path) or {}
@@ -94,6 +95,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
     need_world = _is_placeholder_world(existing_world)
     need_chars = _is_placeholder_characters(existing_characters)
     need_timeline = _is_placeholder_timeline(existing_timeline)
+    # 注意：style.md 必须来自用户输入；canon_init 不负责生成/覆盖 style
     need_style = not existing_style.strip()
 
     # 都不需要则直接跳过
@@ -204,6 +206,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
         new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}
         new_chars = obj.get("characters") if isinstance(obj.get("characters"), dict) else {}
         new_timeline = obj.get("timeline") if isinstance(obj.get("timeline"), dict) else {}
+        # style_suggestions 仅用于提示/日志；不写入 style.md（style.md 必须来自用户输入）
         style_suggestions = str(obj.get("style_suggestions", "") or "")
 
         # 若两次仍失败：立刻写入“最小可用模板”，避免 writer/editor 拿到空 Canon 导致通过率极低
@@ -240,8 +243,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
                     timeline_path,
                     {"events": [{"order": 1, "when": "开篇", "what": "主角误入修仙世界并被宗门注意", "impact": "被迫卷入宗门纷争"}]},
                 )
-            if need_style:
-                write_text(style_path, "偏网文节奏：冲突前置，短句，多画面感，少空泛总结。\n")
+            # style.md 不在此处兜底写入
 
             if logger:
                 logger.event(
@@ -252,7 +254,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
                     wrote_world=bool(need_world),
                     wrote_characters=bool(need_chars),
                     wrote_timeline=bool(need_timeline),
-                    wrote_style=bool(need_style),
+                    wrote_style=False,
                     fallback_template=True,
                 )
             state["canon_init_used_llm"] = True
@@ -272,10 +274,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
         if need_timeline and isinstance(new_timeline, dict) and new_timeline:
             write_json(timeline_path, _merge_keep_existing(existing_timeline, new_timeline))
             wrote_timeline = True
-        if need_style and style_suggestions.strip():
-            # 不覆盖用户已经写的 style.md；仅在空时写入建议
-            write_text(style_path, style_suggestions.strip() + "\n")
-            wrote_style = True
+        # style.md 不在此处写入（必须来自用户输入）
 
         if logger:
             logger.event(
@@ -328,8 +327,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 ]
             },
         )
-    if need_style:
-        write_text(style_path, "偏网文节奏：冲突前置，短句，多画面感，少空泛总结。\n")
+    # style.md 不在此处兜底写入
 
     state["canon_init_used_llm"] = False
     if logger:
@@ -341,7 +339,7 @@ def canon_init_agent(state: StoryState) -> StoryState:
             wrote_world=bool(need_world),
             wrote_characters=bool(need_chars),
             wrote_timeline=bool(need_timeline),
-            wrote_style=bool(need_style),
+            wrote_style=False,
         )
     return state
 

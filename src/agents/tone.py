@@ -26,6 +26,8 @@ def tone_agent(state: StoryState) -> StoryState:
         logger.event("node_start", node="tone", chapter_index=0)
 
     idea = str(state.get("user_input", "") or "")
+    chapters_total = int(state.get("chapters_total", 1) or 1)
+    target_words = int(state.get("target_words", 800) or 800)
     planner_result = state.get("planner_result") or {}
     project_name = str((planner_result or {}).get("项目名称", "") or "")
 
@@ -42,9 +44,12 @@ def tone_agent(state: StoryState) -> StoryState:
     except Exception:
         instr = ""
 
+    # 兼容：canon/style.md 已废弃为主来源；若存在则仅作为“历史项目风格补充”
     project_dir = str(state.get("project_dir", "") or "")
     canon = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
-    style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2200)
+    legacy_style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=1600)
+    user_style = truncate_text(str(state.get("style_override", "") or ""), max_chars=1200)
+    paragraph_rules = truncate_text(str(state.get("paragraph_rules", "") or ""), max_chars=800)
 
     llm = state.get("llm")
     if llm:
@@ -97,6 +102,7 @@ def tone_agent(state: StoryState) -> StoryState:
                 "要求：\n"
                 "- style_constraints 8~15条，必须是“写作可执行规则”，不要空泛。\n"
                 "- avoid 5~10条，专门列出‘AI味/套话/常见失误’。\n"
+                f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请据此给出 pacing（例如每章信息密度、冲突频率、段落长度倾向）。\n"
                 "- 若 Canon 的 style.md 已有约束，请先继承并补全，不要互相冲突。\n"
             )
         )
@@ -104,9 +110,12 @@ def tone_agent(state: StoryState) -> StoryState:
             content=(
                 f"项目：{project_name}\n"
                 f"点子：{idea}\n"
+                f"章节数：{chapters_total}\n"
+                f"每章目标字数：{target_words}\n"
                 + (f"\n策划任务书（开篇基调）：\n{instr}\n" if instr else "")
-                + "\n【Canon style.md（真值来源，若存在需遵守/补全）】\n"
-                + f"{style_text}\n"
+                + (("\n【用户风格覆盖（最高优先级；不与 Canon 冲突）】\n" + user_style + "\n") if user_style.strip() else "")
+                + (("\n【段落/结构规则（尽量执行）】\n" + paragraph_rules + "\n") if paragraph_rules.strip() else "")
+                + (("\n【历史风格（legacy，可选参考）】\n" + legacy_style_text + "\n") if legacy_style_text.strip() else "")
             )
         )
         resp = _invoke_once("tone", system, human)

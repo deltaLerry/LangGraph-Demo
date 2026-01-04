@@ -93,7 +93,6 @@ def editor_agent(state: StoryState) -> StoryState:
             ),
             max_chars=6000,
         )
-        style_text = truncate_text(str(canon.get("style", "") or ""), max_chars=2000)
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
         # === 2.0：阶段3材料包（用于主编审核对照：本章细纲/人物卡/基调） ===
@@ -111,8 +110,8 @@ def editor_agent(state: StoryState) -> StoryState:
                 "你要用“反证式审稿”：优先寻找会导致后续崩盘的逻辑漏洞/一致性漏洞/风格硬伤。\n"
                 "\n"
                 "一致性优先级（硬约束→软约束）：\n"
-                "1) Canon 设定（world/characters/timeline/style）：真值来源，任何冲突都算硬伤\n"
-                "2) 阶段3【材料包】（人物卡/本章细纲/基调）：必须遵循；但不得覆盖 Canon\n"
+                "1) Canon 设定（world/characters/timeline）：真值来源，任何冲突都算硬伤\n"
+                "2) 阶段3【材料包】（人物卡/本章细纲/基调/风格约束）：必须遵循；但不得覆盖 Canon\n"
                 "3) 最近章节记忆：用于连续性；若与 Canon 冲突，以 Canon 为准\n"
                 "4) 用户风格覆盖/段落规则：若不与 Canon 冲突，优先执行\n"
                 "5) planner 任务：仅参考\n"
@@ -167,8 +166,6 @@ def editor_agent(state: StoryState) -> StoryState:
                 + f"策划任务（参考）：{planner_result}\n\n"
                 "【Canon 设定（真值来源）】\n"
                 f"{canon_text}\n\n"
-                "【文风约束】\n"
-                f"{style_text}\n\n"
                 + (("【用户风格覆盖（不与 Canon 冲突时优先执行）】\n" + user_style + "\n\n") if user_style else "")
                 + (("【段落/结构约束（不与 Canon 冲突时优先执行）】\n" + paragraph_rules + "\n\n") if paragraph_rules else "")
                 + (

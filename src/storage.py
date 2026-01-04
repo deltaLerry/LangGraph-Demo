@@ -118,22 +118,7 @@ def ensure_canon_files(project_dir: str) -> Dict[str, str]:
         write_json(paths["characters"], {"characters": []})
     if not os.path.exists(paths["timeline"]):
         write_json(paths["timeline"], {"events": []})
-    if not os.path.exists(paths["style"]):
-        write_text(
-            paths["style"],
-            "\n".join(
-                [
-                    "# 文风约束（可编辑）",
-                    "",
-                    "- 叙述视角：第三人称/第一人称（按项目选择）",
-                    "- 节奏：短句为主，关键场景拉长描写",
-                    "- 禁止：AI味总结句、机械重复句式、无意义的套话",
-                    "",
-                    "（你可以把你喜欢的网文片段特征写在这里，后续写作会注入。）",
-                    "",
-                ]
-            ),
-        )
+    # style.md 不再写默认模板：必须来自用户输入（idea / idea-file / CLI），由主流程负责创建/校验
     return paths
 
 

@@ -160,6 +160,8 @@ def planner_agent(state: StoryState) -> StoryState:
     # 说明：main.py 会把 idea-file 原文放到 idea_source_text 中；若为空则退化为 user_input。
     raw_text = str(state.get("idea_source_text", "") or "").strip()
     idea = str(state.get("user_input", "默认点子") or "").strip()
+    # 允许用户直接用 --idea 传入“点子包格式”，此时也应触发解析
+    raw_for_intake = raw_text or idea
     if raw_text:
         idea = raw_text
 
@@ -201,7 +203,7 @@ def planner_agent(state: StoryState) -> StoryState:
             llm = None
 
     # 1) 如果像“点子包”，先抽取结构化字段并回填 state（但尊重 CLI/config 已提供的覆盖）
-    if raw_text and _looks_like_idea_pack(raw_text):
+    if raw_for_intake and _looks_like_idea_pack(raw_for_intake):
         intake: Dict[str, Any] = {}
         if llm:
             try:
@@ -231,7 +233,7 @@ def planner_agent(state: StoryState) -> StoryState:
                 human0 = HumanMessage(
                     content=(
                         "点子包文件内容：\n"
-                        f"{truncate_text(raw_text, max_chars=12000)}\n"
+                        f"{truncate_text(raw_for_intake, max_chars=12000)}\n"
                     )
                 )
                 if logger:
@@ -266,7 +268,7 @@ def planner_agent(state: StoryState) -> StoryState:
             except Exception:
                 intake = {}
         if not intake:
-            intake = _parse_idea_pack_fallback(raw_text)
+            intake = _parse_idea_pack_fallback(raw_for_intake)
 
         # 回填 state（CLI/config 优先：若已提供则不覆盖）
         state["idea_intake"] = dict(intake) if isinstance(intake, dict) else {}

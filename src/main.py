@@ -150,10 +150,25 @@ def main():
     # idea 支持从文件读取（优先级最高）
     idea_from_file: str | None = None
     idea_file_path: str = ""
+    def _resolve_user_path(p: str, *, base_dir: str) -> str:
+        """
+        解析用户输入路径：
+        - 绝对路径：直接使用
+        - 相对路径：优先按当前工作目录(CWD)解析；若不存在，再按 base_dir（通常为 config_dir）解析
+        """
+        p = (p or "").strip()
+        if not p:
+            return ""
+        if os.path.isabs(p):
+            return p
+        cand_cwd = os.path.abspath(p)
+        if os.path.exists(cand_cwd):
+            return cand_cwd
+        cand_base = os.path.abspath(os.path.join(base_dir, p))
+        return cand_base
+
     if args.idea_file and args.idea_file.strip():
-        idea_path = args.idea_file.strip()
-        if not os.path.isabs(idea_path):
-            idea_path = os.path.join(config_dir, idea_path)
+        idea_path = _resolve_user_path(args.idea_file.strip(), base_dir=config_dir)
         if not os.path.exists(idea_path):
             raise FileNotFoundError(f"未找到 idea 文件：{idea_path}")
         # 支持 UTF-8 BOM
@@ -166,9 +181,7 @@ def main():
     # style 支持从文件读取（优先级高于 --style）
     style_from_file: str | None = None
     if args.style_file and args.style_file.strip():
-        style_path = args.style_file.strip()
-        if not os.path.isabs(style_path):
-            style_path = os.path.join(config_dir, style_path)
+        style_path = _resolve_user_path(args.style_file.strip(), base_dir=config_dir)
         if not os.path.exists(style_path):
             raise FileNotFoundError(f"未找到 style 文件：{style_path}")
         with open(style_path, "r", encoding="utf-8-sig") as f:
@@ -420,6 +433,8 @@ def main():
     ensure_materials_files(project_dir)
     planned_state["project_dir"] = project_dir
 
+    # 兼容：不再要求 canon/style.md；文风应由“材料包（tone/style_constraints/avoid）+ 用户覆盖”驱动
+
     # 阶段2.2：初始化 Canon（仅在占位时写入，避免覆盖人工维护）
     planned_state["project_dir"] = project_dir
     planned_state["stage"] = settings.stage
@@ -551,8 +566,9 @@ def main():
             "stage": settings.stage,
             "memory_recent_k": int(settings.memory_recent_k),
             "include_unapproved_memories": bool(settings.include_unapproved_memories),
-            "style_override": str(settings.style_override or ""),
-            "paragraph_rules": str(settings.paragraph_rules or ""),
+            # 注意：planner 可能从点子包回填 style/段落规则；这里要用“生效值”，不要覆盖回 settings
+            "style_override": str(planned_state.get("style_override", "") or ""),
+            "paragraph_rules": str(planned_state.get("paragraph_rules", "") or ""),
             "editor_min_issues": int(settings.editor_min_issues),
             "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
             "llm_max_attempts": int(settings.llm_max_attempts),

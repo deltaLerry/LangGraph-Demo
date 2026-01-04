@@ -189,8 +189,8 @@ python main.py \
   --llm-mode llm \
   --idea-file "test-idea.md" \
   --project "无限：规则怪谈" \
-  --target-words 4000 \
-  --chapters 10 \
+  --target-words 3500 \
+  --chapters 200 \
   --max-rewrites 1 \
   --editor-min-issues 2 \
   --editor-retry-on-invalid 1 \
