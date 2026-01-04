@@ -24,8 +24,6 @@ memory_recent_k = 3
 # editor 稳定性参数
 # - editor_min_issues：主编拒稿时至少给出多少条 issues（默认2）
 # - editor_retry_on_invalid：主编 JSON 不合法/issue过少时自动修复重试次数（默认1）
-# editor_min_issues = 2
-# editor_retry_on_invalid = 1
 editor_min_issues = 2
 editor_retry_on_invalid = 1
 
@@ -54,10 +52,10 @@ debug = true
 
 [generation]
 # 目标字数（每章）
-target_words = 5000
+target_words = 800
 
 # 章节数
-chapters = 150
+chapters = 1
 
 # 每章最多返工次数（不含首稿）
 max_rewrites = 1
