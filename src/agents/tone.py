@@ -9,6 +9,7 @@ from json_utils import extract_first_json_object
 from llm_meta import extract_finish_reason_and_usage
 from storage import load_canon_bundle
 from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract(text: str) -> Dict[str, Any]:
@@ -118,48 +119,25 @@ def tone_agent(state: StoryState) -> StoryState:
                 + (("\n【历史风格（legacy，可选参考）】\n" + legacy_style_text + "\n") if legacy_style_text.strip() else "")
             )
         )
-        resp = _invoke_once("tone", system, human)
-        text = (getattr(resp, "content", "") or "").strip()
-        if logger:
-            fr, usage = extract_finish_reason_and_usage(resp)
-            logger.event(
-                "llm_response",
-                node="tone",
-                chapter_index=0,
-                content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=fr,
-                token_usage=usage,
-            )
-        obj = _extract(text)
-        fr0, _usage0 = extract_finish_reason_and_usage(resp)
-
-        if (not obj) or (fr0 and str(fr0).lower() == "length"):
-            system_retry = SystemMessage(
-                content=(
-                    "你是小说项目的“基调策划”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
-                    "务必短：确保 JSON 完整可解析。\n"
-                    "硬性约束：\n"
-                    "- style_constraints 6~10条，每条<=30字\n"
-                    "- avoid 5~8条，每条<=20字\n"
-                    "- narration/pacing/reference_style 尽量短\n"
-                    "输出 JSON schema 与上一次相同。\n"
-                )
-            )
-            resp2 = _invoke_once("tone_retry", system_retry, human)
-            text2 = (getattr(resp2, "content", "") or "").strip()
-            if logger:
-                fr2, usage2 = extract_finish_reason_and_usage(resp2)
-                logger.event(
-                    "llm_response",
-                    node="tone_retry",
-                    chapter_index=0,
-                    content=truncate_text(text2, max_chars=getattr(logger, "max_chars", 20000)),
-                    finish_reason=fr2,
-                    token_usage=usage2,
-                )
-            obj2 = _extract(text2)
-            if obj2:
-                obj = obj2
+        schema_text = (
+            "{\n"
+            '  "narration": "string",\n'
+            '  "pacing": "string",\n'
+            '  "reference_style": "string",\n'
+            '  "style_constraints": ["string"],\n'
+            '  "avoid": ["string"]\n'
+            "}\n"
+        )
+        obj, _raw, _fr0, _usage0 = invoke_json_with_repair(
+            llm=llm,
+            messages=[system, human],
+            schema_text=schema_text,
+            node="tone",
+            chapter_index=0,
+            logger=logger,
+            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+        )
 
         if not obj:
             if state.get("force_llm", False):

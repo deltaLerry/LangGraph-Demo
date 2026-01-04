@@ -10,6 +10,7 @@ from llm_meta import extract_finish_reason_and_usage
 from storage import load_canon_bundle
 from json_utils import extract_first_json_object
 from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -73,6 +74,28 @@ def memory_agent(state: StoryState) -> StoryState:
                 f"{writer_result}\n"
             )
         )
+
+        schema_text = (
+            "{\n"
+            '  "chapter_index": number,\n'
+            '  "summary": "string",\n'
+            '  "events": [{"what":"string","where":"string","who":["string"],"result":"string"}],\n'
+            '  "character_updates": [{"name":"string","status":"string","new_info":"string"}],\n'
+            '  "new_facts": [{"type":"world|character|timeline|item|place|faction","key":"string","value":"string"}],\n'
+            '  "open_threads": ["string"],\n'
+            '  "style_notes": ["string"]\n'
+            "}\n"
+        )
+
+        def _validate(m: Dict[str, Any]) -> str:
+            # 轻量校验：至少要有 summary 与 events（否则后续不可用）
+            if not str(m.get("summary", "") or "").strip():
+                return "missing_or_empty_summary"
+            ev = m.get("events")
+            if not isinstance(ev, list) or len(ev) == 0:
+                return "missing_or_empty_events"
+            return ""
+
         if logger:
             model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
             with logger.llm_call(
@@ -82,34 +105,30 @@ def memory_agent(state: StoryState) -> StoryState:
                 model=model,
                 base_url=str(getattr(llm, "base_url", "") or ""),
             ):
-                resp = invoke_with_retry(
-                    llm,
-                    [system, human],
-                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    logger=logger,
+                mem, _raw, _fr, _usage = invoke_json_with_repair(
+                    llm=llm,
+                    messages=[system, human],
+                    schema_text=schema_text,
                     node="memory",
                     chapter_index=chapter_index,
+                    logger=logger,
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    validate=_validate,
                 )
         else:
-            resp = invoke_with_retry(
-                llm,
-                [system, human],
-                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-            )
-        text = (getattr(resp, "content", "") or "").strip()
-        if logger:
-            finish_reason, token_usage = extract_finish_reason_and_usage(resp)
-            logger.event(
-                "llm_response",
+            mem, _raw, _fr, _usage = invoke_json_with_repair(
+                llm=llm,
+                messages=[system, human],
+                schema_text=schema_text,
                 node="memory",
                 chapter_index=chapter_index,
-                content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=finish_reason,
-                token_usage=token_usage,
+                logger=None,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=_validate,
             )
-        mem = _extract_first_json_obj(text)
+
         mem["chapter_index"] = chapter_index
         # 额外元信息（非 LLM 生成字段）：用于后续区分“通过/不通过”的记忆来源
         mem["editor_decision"] = decision

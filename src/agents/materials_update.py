@@ -10,6 +10,7 @@ from json_utils import extract_first_json_object
 from storage import load_canon_bundle, normalize_canon_bundle
 from materials import materials_prompt_digest
 from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract(text: str) -> Dict[str, Any]:
@@ -134,6 +135,27 @@ def materials_update_agent(state: StoryState) -> StoryState:
         )
     )
 
+    schema_text = (
+        "{\n"
+        '  "items": [\n'
+        "    {\n"
+        '      "action": "materials_patch|canon_patch",\n'
+        '      "issue": "string",\n'
+        '      "quote": "string",\n'
+        '      "type": "outline|tone|world|character|timeline|style",\n'
+        '      "canon_patch": {"target":"world.json|characters.json|timeline.json|style.md|N/A","op":"append|note|N/A","path":"string|N/A","value":"any|N/A"},\n'
+        '      "materials_patch": {"target":"outline.json|tone.json|N/A","op":"append|note|N/A","path":"string|N/A","value":"any|N/A"}\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+
+    def _validate(obj: Dict[str, Any]) -> str:
+        arr = obj.get("items")
+        if not isinstance(arr, list):
+            return "items_not_list"
+        return ""
+
     if logger:
         model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
         with logger.llm_call(
@@ -143,36 +165,29 @@ def materials_update_agent(state: StoryState) -> StoryState:
             model=model,
             base_url=str(getattr(llm, "base_url", "") or ""),
         ):
-            resp = invoke_with_retry(
-                llm,
-                [system, human],
-                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                logger=logger,
+            obj, _raw, _fr, _usage = invoke_json_with_repair(
+                llm=llm,
+                messages=[system, human],
+                schema_text=schema_text,
                 node="materials_update",
                 chapter_index=chapter_index,
+                logger=logger,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=_validate,
             )
     else:
-        resp = invoke_with_retry(
-            llm,
-            [system, human],
-            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-        )
-
-    text = (getattr(resp, "content", "") or "").strip()
-    if logger:
-        fr, usage = extract_finish_reason_and_usage(resp)
-        logger.event(
-            "llm_response",
+        obj, _raw, _fr, _usage = invoke_json_with_repair(
+            llm=llm,
+            messages=[system, human],
+            schema_text=schema_text,
             node="materials_update",
             chapter_index=chapter_index,
-            content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-            finish_reason=fr,
-            token_usage=usage,
+            logger=None,
+            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+            validate=_validate,
         )
-
-    obj = _extract(text)
     items = obj.get("items") if isinstance(obj.get("items"), list) else []
     out: List[Dict[str, Any]] = []
     for it in items:

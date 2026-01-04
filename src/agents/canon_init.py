@@ -11,7 +11,9 @@ import os
 from storage import load_canon_bundle, read_json, write_json, write_text
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
+from json_utils import extract_first_json_object_with_error
 from llm_call import invoke_with_retry
+from llm_json import repair_json_only
 
 
 def _is_placeholder_world(world: Dict[str, Any]) -> bool:
@@ -180,7 +182,34 @@ def canon_init_agent(state: StoryState) -> StoryState:
 
         # 第一次尝试
         text, fr = _invoke_once("canon_init", system, human)
-        obj = _extract_first_json_obj(text)
+        obj, err = extract_first_json_object_with_error(text)
+
+        # 如果不是 length，而是明确解析错误：立刻把错误原因回传给 LLM 做 JSON 修复（更“解决问题”）
+        if (not obj) and (not (fr and str(fr).lower() == "length")):
+            try:
+                schema_text = (
+                    "{\n"
+                    '  "world": {"rules":[{"name":"string","detail":"string"}], "factions":[{"name":"string","detail":"string"}], "places":[{"name":"string","detail":"string"}], "notes":"string"},\n'
+                    '  "characters": {"characters":[{"name":"string","role":"string","personality":"string","motivation":"string","abilities":"string","taboos":"string","relationships":[{"with":"string","relation":"string"}]}]},\n'
+                    '  "timeline": {"events":[{"order":1,"when":"string","what":"string","impact":"string"}]},\n'
+                    '  "style_suggestions": "string"\n'
+                    "}\n"
+                )
+                obj_fix = repair_json_only(
+                    llm=llm,
+                    bad_text=text,
+                    err=err or "unknown_parse_error",
+                    schema_text=schema_text,
+                    node="canon_init_fix_json",
+                    chapter_index=chapter_index,
+                    logger=logger,
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                )
+                if obj_fix:
+                    obj, err = obj_fix, ""
+            except Exception:
+                pass
 
         # 如果被截断 / 解析失败：做一次更短、更保守的重试，避免 writer/editor 拿到空 Canon 导致通过率极低
         if (not obj) or (fr and str(fr).lower() == "length"):
@@ -200,9 +229,35 @@ def canon_init_agent(state: StoryState) -> StoryState:
                 )
             )
             text2, _fr2 = _invoke_once("canon_init_retry", system_retry, human)
-            obj2 = _extract_first_json_obj(text2)
+            obj2, err2 = extract_first_json_object_with_error(text2)
             if obj2:
-                obj = obj2
+                obj, err = obj2, ""
+            else:
+                # 再把解析错误回传给 LLM，做一次针对性 JSON 修复
+                try:
+                    schema_text = (
+                        "{\n"
+                        '  "world": {"rules":[{"name":"string","detail":"string"}], "factions":[{"name":"string","detail":"string"}], "places":[{"name":"string","detail":"string"}], "notes":"string"},\n'
+                        '  "characters": {"characters":[{"name":"string","role":"string","personality":"string","motivation":"string","abilities":"string","taboos":"string","relationships":[{"with":"string","relation":"string"}]}]},\n'
+                        '  "timeline": {"events":[{"order":1,"when":"string","what":"string","impact":"string"}]},\n'
+                        '  "style_suggestions": "string"\n'
+                        "}\n"
+                    )
+                    obj_fix2 = repair_json_only(
+                        llm=llm,
+                        bad_text=text2,
+                        err=err2 or err or "unknown_parse_error",
+                        schema_text=schema_text,
+                        node="canon_init_retry_fix_json",
+                        chapter_index=chapter_index,
+                        logger=logger,
+                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    )
+                    if obj_fix2:
+                        obj = obj_fix2
+                except Exception:
+                    pass
         new_world = obj.get("world") if isinstance(obj.get("world"), dict) else {}
         new_chars = obj.get("characters") if isinstance(obj.get("characters"), dict) else {}
         new_timeline = obj.get("timeline") if isinstance(obj.get("timeline"), dict) else {}

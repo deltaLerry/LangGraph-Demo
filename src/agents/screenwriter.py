@@ -5,10 +5,9 @@ from typing import Any, Dict
 
 from state import StoryState
 from debug_log import truncate_text
-from json_utils import extract_first_json_object
-from llm_meta import extract_finish_reason_and_usage
+from json_utils import extract_first_json_object, extract_first_json_object_with_error
 from storage import load_canon_bundle
-from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract(text: str) -> Dict[str, Any]:
@@ -93,34 +92,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
             if state.get("force_llm", False):
                 raise RuntimeError("已指定 LLM 模式，但无法导入 langchain_core.messages") from e
             llm = None
-
     if llm:
-        def _invoke_once(node_name: str, system_msg: SystemMessage, human_msg: HumanMessage):
-            if logger:
-                model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-                with logger.llm_call(
-                    node=node_name,
-                    chapter_index=0,
-                    messages=[system_msg, human_msg],
-                    model=model,
-                    base_url=str(getattr(llm, "base_url", "") or ""),
-                ):
-                    return invoke_with_retry(
-                        llm,
-                        [system_msg, human_msg],
-                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                        logger=logger,
-                        node=node_name,
-                        chapter_index=0,
-                    )
-            return invoke_with_retry(
-                llm,
-                [system_msg, human_msg],
-                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-            )
-
         required_range = f"{outline_start}..{outline_end}"
         system = SystemMessage(
             content=(
@@ -147,6 +119,7 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 "- 每章 beats 3~6 条，强调可写作的行动/冲突/信息揭露，不要百科式设定说明。\n"
                 f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请据此统一节奏：长篇要留足伏笔与层层升级，不要在前几章把底牌全掀完。\n"
                 "- 必须遵守 Canon（若 Canon 不完整，用模糊表达，不要强行新增硬设定名词）。\n"
+                "- 若担心输出过长：优先压缩每章 beats（可 2~4 条）与字段长度，保证 JSON 完整可解析。\n"
             )
         )
         human = HumanMessage(
@@ -161,46 +134,74 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 + f"{canon_text}\n"
             )
         )
-        resp = _invoke_once("screenwriter", system, human)
-        text = (getattr(resp, "content", "") or "").strip()
+        schema_text = (
+            "{\n"
+            '  "main_arc": "string",\n'
+            '  "themes": ["string"],\n'
+            '  "chapters": [\n'
+            "    {\n"
+            '      "chapter_index": number,\n'
+            '      "title": "string",\n'
+            '      "goal": "string",\n'
+            '      "conflict": "string",\n'
+            '      "beats": ["string"],\n'
+            '      "ending_hook": "string"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        )
+
+        def _validate(out: Dict[str, Any]) -> str:
+            chs = out.get("chapters")
+            if not isinstance(chs, list):
+                return "chapters_not_list"
+            by = {}
+            for it in chs:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    idx = int(it.get("chapter_index", 0) or 0)
+                except Exception:
+                    idx = 0
+                if idx > 0:
+                    by[idx] = it
+            for i in range(outline_start, outline_end + 1):
+                if i not in by:
+                    return f"missing_chapter:{i}"
+            return ""
+
         if logger:
-            fr, usage = extract_finish_reason_and_usage(resp)
-            logger.event(
-                "llm_response",
+            model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+            with logger.llm_call(
                 node="screenwriter",
                 chapter_index=0,
-                content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=fr,
-                token_usage=usage,
-            )
-        obj = _extract(text)
-        fr0, _usage0 = extract_finish_reason_and_usage(resp)
-
-        if (not obj) or (fr0 and str(fr0).lower() == "length"):
-            system_retry = SystemMessage(
-                content=(
-                    "你是小说项目的“编剧”。你必须且仅输出一个严格 JSON 对象（不要解释、不要 markdown）。\n"
-                    "务必短：确保 JSON 完整可解析。\n"
-                    f"硬性约束：chapters 仍需包含 {required_range} 每一章，但每章 beats 只写 2~3 条，每条不超过 35 字。\n"
-                    "title/goal/conflict/ending_hook 尽量短。\n"
-                    "输出 JSON schema 与上一次相同。\n"
-                )
-            )
-            resp2 = _invoke_once("screenwriter_retry", system_retry, human)
-            text2 = (getattr(resp2, "content", "") or "").strip()
-            if logger:
-                fr2, usage2 = extract_finish_reason_and_usage(resp2)
-                logger.event(
-                    "llm_response",
-                    node="screenwriter_retry",
+                messages=[system, human],
+                model=model,
+                base_url=str(getattr(llm, "base_url", "") or ""),
+            ):
+                obj, _raw, _fr, _usage = invoke_json_with_repair(
+                    llm=llm,
+                    messages=[system, human],
+                    schema_text=schema_text,
+                    node="screenwriter",
                     chapter_index=0,
-                    content=truncate_text(text2, max_chars=getattr(logger, "max_chars", 20000)),
-                    finish_reason=fr2,
-                    token_usage=usage2,
+                    logger=logger,
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    validate=_validate,
                 )
-            obj2 = _extract(text2)
-            if obj2:
-                obj = obj2
+        else:
+            obj, _raw, _fr, _usage = invoke_json_with_repair(
+                llm=llm,
+                messages=[system, human],
+                schema_text=schema_text,
+                node="screenwriter",
+                chapter_index=0,
+                logger=None,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=_validate,
+            )
 
         if not obj:
             if state.get("force_llm", False):

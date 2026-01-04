@@ -9,6 +9,7 @@ from debug_log import truncate_text
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -201,7 +202,6 @@ def planner_agent(state: StoryState) -> StoryState:
                     "已指定 LLM 模式，但无法导入 langchain_core.messages（请检查依赖安装/解释器环境）"
                 ) from e
             llm = None
-
     # 1) 如果像“点子包”，先抽取结构化字段并回填 state（但尊重 CLI/config 已提供的覆盖）
     if raw_for_intake and _looks_like_idea_pack(raw_for_intake):
         intake: Dict[str, Any] = {}
@@ -236,34 +236,46 @@ def planner_agent(state: StoryState) -> StoryState:
                         f"{truncate_text(raw_for_intake, max_chars=12000)}\n"
                     )
                 )
+                schema_text0 = (
+                    "{\n"
+                    '  "project_name": "string",\n'
+                    '  "idea": "string",\n'
+                    '  "style_override": "string",\n'
+                    '  "paragraph_rules": "string"\n'
+                    "}\n"
+                )
+                def _validate_intake(obj: Dict[str, Any]) -> str:
+                    # 只允许这 4 个 key
+                    allowed = {"project_name", "idea", "style_override", "paragraph_rules"}
+                    for k in obj.keys():
+                        if k not in allowed:
+                            return f"unexpected_key:{k}"
+                    return ""
+
                 if logger:
                     with logger.llm_call(node="planner_intake", chapter_index=chapter_index, messages=[system0, human0]):
-                        resp0 = invoke_with_retry(
-                            llm,
-                            [system0, human0],
-                            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                            logger=logger,
+                        intake, _raw0, _fr0, _usage0 = invoke_json_with_repair(
+                            llm=llm,
+                            messages=[system0, human0],
+                            schema_text=schema_text0,
                             node="planner_intake",
                             chapter_index=int(chapter_index or 0),
+                            logger=logger,
+                            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                            validate=_validate_intake,
                         )
                 else:
-                    resp0 = invoke_with_retry(
-                        llm,
-                        [system0, human0],
+                    intake, _raw0, _fr0, _usage0 = invoke_json_with_repair(
+                        llm=llm,
+                        messages=[system0, human0],
+                        schema_text=schema_text0,
+                        node="planner_intake",
+                        chapter_index=int(chapter_index or 0),
+                        logger=None,
                         max_attempts=int(state.get("llm_max_attempts", 3) or 3),
                         base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    )
-                text0 = (getattr(resp0, "content", "") or "").strip()
-                intake = extract_first_json_object(text0) or {}
-                if logger:
-                    logger.event(
-                        "llm_response",
-                        node="planner_intake",
-                        chapter_index=chapter_index,
-                        content=truncate_text(text0, max_chars=getattr(logger, "max_chars", 20000)),
-                        finish_reason=extract_finish_reason_and_usage(resp0)[0],
-                        token_usage=extract_finish_reason_and_usage(resp0)[1],
+                        validate=_validate_intake,
                     )
             except Exception:
                 intake = {}
@@ -371,6 +383,34 @@ def planner_agent(state: StoryState) -> StoryState:
                 + ("任务槽位提示：\n" + hints + "\n" if hints else "")
             )
         )
+        schema_text_main = (
+            "{\n"
+            '  "项目名称": "string",\n'
+            '  "任务列表": [\n'
+            "    {\"任务名称\":\"string\",\"执行者\":\"string\",\"任务指令\":\"string\"}\n"
+            "  ]\n"
+            "}\n"
+        )
+        slot_names = [str(t.get("task_name", "") or "") for t in tasks]
+        slot_execs = [str(t.get("executor", "") or "") for t in tasks]
+
+        def _validate_planner(obj: Dict[str, Any]) -> str:
+            if "项目名称" not in obj:
+                return "missing:项目名称"
+            arr = obj.get("任务列表")
+            if not isinstance(arr, list) or len(arr) != len(tasks):
+                return f"任务列表长度不匹配(expected={len(tasks)})"
+            for i, it in enumerate(arr):
+                if not isinstance(it, dict):
+                    return f"任务列表[{i}]不是object"
+                if str(it.get("任务名称", "") or "") != slot_names[i]:
+                    return f"任务名称不匹配(idx={i})"
+                if str(it.get("执行者", "") or "") != slot_execs[i]:
+                    return f"执行者不匹配(idx={i})"
+                if not str(it.get("任务指令", "") or "").strip():
+                    return f"任务指令为空(idx={i})"
+            return ""
+
         if logger:
             cfg = getattr(getattr(llm, "client", None), "base_url", None)
             model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
@@ -381,67 +421,29 @@ def planner_agent(state: StoryState) -> StoryState:
                 model=model,
                 base_url=str(getattr(llm, "base_url", "") or cfg or ""),
             ):
-                resp = invoke_with_retry(
-                    llm,
-                    [system, human],
-                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    logger=logger,
+                planner_result, _rawm, _frm, _usm = invoke_json_with_repair(
+                    llm=llm,
+                    messages=[system, human],
+                    schema_text=schema_text_main,
                     node="planner",
                     chapter_index=chapter_index,
-                )
-        else:
-            resp = invoke_with_retry(
-                llm,
-                [system, human],
-                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-            )
-        if logger:
-            logger.event(
-                "llm_response",
-                node="planner",
-                chapter_index=chapter_index,
-                content=truncate_text(str(getattr(resp, "content", "") or ""), max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=extract_finish_reason_and_usage(resp)[0],
-                token_usage=extract_finish_reason_and_usage(resp)[1],
-            )
-        # planner 稳定性：解析失败不再抛异常；必要时做一次 JSON 修复重试；仍失败则降级为模板 planner
-        text0 = getattr(resp, "content", "") or ""
-        planner_result = _extract_first_json_obj(text0)
-        if not planner_result:
-            try:
-                fix_system = SystemMessage(
-                    content=(
-                        "你是 JSON 修复器。请把给定输出修复为一个严格 JSON 对象。\n"
-                        "必须且仅输出 JSON（不要解释/不要 markdown）。\n"
-                        "schema：{ \"项目名称\": \"string\", \"任务列表\": [ {\"任务名称\":\"string\",\"执行者\":\"string\",\"任务指令\":\"string\"} ] }\n"
-                        "要求：任务列表数量必须与槽位数量一致，顺序保持与 schema 一致。\n"
-                    )
-                )
-                fix_human = HumanMessage(content="原始输出：\n" + truncate_text(str(text0), max_chars=12000) + "\n\n输出修复后的 JSON：")
-                resp_fix = invoke_with_retry(
-                    llm,
-                    [fix_system, fix_human],
+                    logger=logger,
                     max_attempts=int(state.get("llm_max_attempts", 3) or 3),
                     base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    logger=logger,
-                    node="planner_fix_json",
-                    chapter_index=chapter_index,
+                    validate=_validate_planner,
                 )
-                text_fix = (getattr(resp_fix, "content", "") or "").strip()
-                planner_result = _extract_first_json_obj(text_fix)
-                if logger:
-                    logger.event(
-                        "llm_response",
-                        node="planner_fix_json",
-                        chapter_index=chapter_index,
-                        content=truncate_text(text_fix, max_chars=getattr(logger, "max_chars", 20000)),
-                        finish_reason=extract_finish_reason_and_usage(resp_fix)[0],
-                        token_usage=extract_finish_reason_and_usage(resp_fix)[1],
-                    )
-            except Exception:
-                planner_result = {}
+        else:
+            planner_result, _rawm, _frm, _usm = invoke_json_with_repair(
+                llm=llm,
+                messages=[system, human],
+                schema_text=schema_text_main,
+                node="planner",
+                chapter_index=chapter_index,
+                logger=None,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=_validate_planner,
+            )
 
         if not planner_result:
             if logger:

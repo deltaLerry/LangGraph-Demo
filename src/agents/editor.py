@@ -12,6 +12,7 @@ from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from materials import materials_prompt_digest
 from llm_call import invoke_with_retry
+from llm_json import invoke_json_with_repair
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -59,7 +60,6 @@ def editor_agent(state: StoryState) -> StoryState:
                     "已指定 LLM 模式，但无法导入 langchain_core.messages（请检查依赖安装/解释器环境）"
                 ) from e
             llm = None
-
     if llm:
         if logger:
             logger.event("node_start", node="editor", chapter_index=state.get("chapter_index", 1))
@@ -200,6 +200,51 @@ def editor_agent(state: StoryState) -> StoryState:
                 f"{writer_result}\n"
             )
         )
+        schema_text = (
+            "{\n"
+            '  "decision": "审核通过|审核不通过",\n'
+            '  "issues": [\n'
+            "    {\n"
+            '      "type": "logic|canon|pacing|character|style|readability",\n'
+            '      "canon_key": "string|N/A",\n'
+            '      "quote": "string",\n'
+            '      "issue": "string",\n'
+            '      "fix": "string",\n'
+            '      "action": "rewrite|canon_patch",\n'
+            '      "canon_patch": {"target":"world.json|characters.json|timeline.json|style.md|N/A","op":"append|note|N/A","path":"string|N/A","value":"any|N/A"}\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        )
+
+        def _validate(rep: Dict[str, Any]) -> str:
+            dec = str(rep.get("decision", "") or "").strip()
+            if dec not in ("审核通过", "审核不通过"):
+                return "invalid_decision"
+            iss = rep.get("issues")
+            if dec == "审核通过":
+                # 通过时允许 issues 为空（便于提高最后一轮通过率）
+                return ""
+            # 拒稿：issues 必须是 list 且数量达到期望阈值
+            if not isinstance(iss, list):
+                return "issues_not_list"
+            need_n = max(0, int(desired_min_issues or 0))
+            if need_n > 0 and len([x for x in iss if isinstance(x, dict)]) < need_n:
+                return f"issues_too_few(expected>={need_n})"
+            # 最小字段校验（避免空 issue）
+            for i, it in enumerate(iss):
+                if not isinstance(it, dict):
+                    continue
+                if not str(it.get("quote", "") or "").strip():
+                    return f"issue_missing_quote(idx={i})"
+                if not str(it.get("issue", "") or "").strip():
+                    return f"issue_missing_issue(idx={i})"
+                if not str(it.get("fix", "") or "").strip():
+                    return f"issue_missing_fix(idx={i})"
+                if not str(it.get("action", "") or "").strip():
+                    return f"issue_missing_action(idx={i})"
+            return ""
+
         if logger:
             model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
             with logger.llm_call(
@@ -209,96 +254,33 @@ def editor_agent(state: StoryState) -> StoryState:
                 model=model,
                 base_url=str(getattr(llm, "base_url", "") or ""),
             ):
-                resp = invoke_with_retry(
-                    llm,
-                    [system, human],
-                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    logger=logger,
+                report, _raw, _fr, _usage = invoke_json_with_repair(
+                    llm=llm,
+                    messages=[system, human],
+                    schema_text=schema_text,
                     node="editor",
                     chapter_index=state.get("chapter_index", 1),
-                )
-        else:
-            resp = invoke_with_retry(
-                llm,
-                [system, human],
-                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-            )
-        text = (getattr(resp, "content", "") or "").strip()
-        if logger:
-            finish_reason, token_usage = extract_finish_reason_and_usage(resp)
-            logger.event(
-                "llm_response",
-                node="editor",
-                chapter_index=state.get("chapter_index", 1),
-                content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-                finish_reason=finish_reason,
-                token_usage=token_usage,
-            )
-        # === 解析与稳定性：不再让“JSON输出不合规”直接崩溃整条流水线 ===
-        # 目标：让系统可持续产出（即使主编输出格式偶发异常），并为后续排障保留日志/上下文。
-        def _parse_report(t: str) -> tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
-            rep = _extract_first_json_obj(t) or {}
-            dec = str(rep.get("decision", "") or "").strip()
-            iss_obj = rep.get("issues")
-            iss_list: List[Dict[str, Any]] = [x for x in iss_obj if isinstance(x, dict)] if isinstance(iss_obj, list) else []
-            return dec, iss_list, rep
-
-        decision, issues_list, report = _parse_report(text)
-
-        need_retry = False
-        invalid = decision not in ("审核通过", "审核不通过")
-        if invalid:
-            need_retry = True
-        if (not invalid) and decision == "审核不通过" and desired_min_issues > 0 and len(issues_list) < desired_min_issues:
-            need_retry = True
-
-        # 可选二次重试：让 LLM “修复 JSON / 补齐 issues”，提升一次过审与稳定性
-        if need_retry and retry_on_invalid > 0:
-            try:
-                fix_system = SystemMessage(
-                    content=(
-                        "你是 JSON 修复器。请把给定的主编输出修复为一个严格 JSON 对象，且符合 schema。\n"
-                        "必须且仅输出 JSON（不要解释/不要 markdown）。\n"
-                        "要求：\n"
-                        f"- decision 必须是 审核通过 或 审核不通过\n"
-                        f"- 若 decision=审核不通过，issues 至少 {max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)} 条（每条必须有 quote/issue/fix/action）\n"
-                    )
-                )
-                fix_human = HumanMessage(
-                    content=(
-                        "原始主编输出：\n"
-                        f"{truncate_text(text, max_chars=12000)}\n\n"
-                        "请输出修复后的 JSON："
-                    )
-                )
-                resp_fix = invoke_with_retry(
-                    llm,
-                    [fix_system, fix_human],
+                    logger=logger,
                     max_attempts=int(state.get("llm_max_attempts", 3) or 3),
                     base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-                    logger=logger,
-                    node="editor_fix_json",
-                    chapter_index=state.get("chapter_index", 1),
+                    validate=_validate,
                 )
-                text_fix = (getattr(resp_fix, "content", "") or "").strip()
-                d2, i2, r2 = _parse_report(text_fix)
-                if d2 in ("审核通过", "审核不通过"):
-                    decision, issues_list, report = d2, i2, r2
-                    if logger:
-                        fr2, usage2 = extract_finish_reason_and_usage(resp_fix)
-                        logger.event(
-                            "llm_response",
-                            node="editor_fix_json",
-                            chapter_index=state.get("chapter_index", 1),
-                            content=truncate_text(text_fix, max_chars=getattr(logger, "max_chars", 20000)),
-                            finish_reason=fr2,
-                            token_usage=usage2,
-                        )
-            except Exception:
-                # 任何修复失败都不应阻断主流程；走兜底
-                pass
+        else:
+            report, _raw, _fr, _usage = invoke_json_with_repair(
+                llm=llm,
+                messages=[system, human],
+                schema_text=schema_text,
+                node="editor",
+                chapter_index=state.get("chapter_index", 1),
+                logger=None,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=_validate,
+            )
+
+        decision = str(report.get("decision", "") or "").strip()
+        iss_obj = report.get("issues")
+        issues_list: List[Dict[str, Any]] = [x for x in iss_obj if isinstance(x, dict)] if isinstance(iss_obj, list) else []
 
         # 最终兜底：仍然不合法就降级为“审核不通过 + 结构化最小问题”，避免整次运行退出
         if decision not in ("审核通过", "审核不通过"):
