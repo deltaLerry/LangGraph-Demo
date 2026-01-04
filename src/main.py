@@ -39,6 +39,7 @@ from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
 from arc_summary import generate_arc_summary, write_arc_summary
+from materials import pick_outline_for_chapter
 
 
 def main():
@@ -546,6 +547,62 @@ def main():
     planned_state["chapters_total"] = int(end_chapter)
 
     for idx in range(start_chapter, end_chapter + 1):
+        # === 章节细纲自动扩展（长篇分块生成） ===
+        try:
+            mb0 = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+            if isinstance(mb0, dict):
+                chap_outline = pick_outline_for_chapter(mb0, int(idx))
+                if not chap_outline:
+                    # 默认按 20 章一块（适配“每个副本10~20章”的规则），避免一次生成 200 章导致模型偷懒/截断
+                    block = 20
+                    start_i = int(idx)
+                    end_i = min(int(end_chapter), start_i + block - 1)
+                    tmp_state = dict(planned_state)
+                    tmp_state["outline_start"] = start_i
+                    tmp_state["outline_end"] = end_i
+                    tmp_state["materials_bundle"] = mb0
+                    tmp_state = screenwriter_agent(tmp_state)
+                    new_outline = tmp_state.get("screenwriter_result") if isinstance(tmp_state.get("screenwriter_result"), dict) else {}
+                    if isinstance(new_outline, dict):
+                        # 合并回 materials_bundle.outline（按 chapter_index upsert）
+                        outline0 = mb0.get("outline") if isinstance(mb0.get("outline"), dict) else {}
+                        chs0 = outline0.get("chapters") if isinstance(outline0.get("chapters"), list) else []
+                        by_idx: dict[int, dict] = {}
+                        for it in chs0:
+                            if isinstance(it, dict):
+                                try:
+                                    by_idx[int(it.get("chapter_index", 0) or 0)] = it
+                                except Exception:
+                                    pass
+                        for it in (new_outline.get("chapters") if isinstance(new_outline.get("chapters"), list) else []):
+                            if isinstance(it, dict):
+                                try:
+                                    by_idx[int(it.get("chapter_index", 0) or 0)] = it
+                                except Exception:
+                                    pass
+                        merged_chs = [by_idx[k] for k in sorted([k for k in by_idx.keys() if k > 0])]
+                        outline0 = dict(outline0)
+                        if not str(outline0.get("main_arc", "") or "").strip() and str(new_outline.get("main_arc", "") or "").strip():
+                            outline0["main_arc"] = new_outline.get("main_arc", "")
+                        if (not outline0.get("themes")) and new_outline.get("themes"):
+                            outline0["themes"] = new_outline.get("themes", [])
+                        outline0["chapters"] = merged_chs
+                        mb0 = dict(mb0)
+                        mb0["outline"] = outline0
+                        planned_state["materials_bundle"] = mb0
+                        planned_state["screenwriter_result"] = outline0
+                        # 同步更新 current/materials/outline.json 与 materials_bundle.json（便于你 review）
+                        try:
+                            materials_dir_current = os.path.join(current_dir, "materials")
+                            os.makedirs(materials_dir_current, exist_ok=True)
+                            write_json(os.path.join(materials_dir_current, "outline.json"), outline0)  # type: ignore[arg-type]
+                            write_json(os.path.join(materials_dir_current, "materials_bundle.json"), mb0)  # type: ignore[arg-type]
+                        except Exception:
+                            pass
+        except Exception:
+            # 细纲扩展失败不阻断章节生成（writer 仍可在无细纲情况下工作，只是质量会降）
+            pass
+
         chapter_state: StoryState = {
             **planned_state,
             "chapter_index": idx,
