@@ -8,6 +8,7 @@ from debug_log import truncate_text
 from json_utils import extract_first_json_object
 from llm_meta import extract_finish_reason_and_usage
 from storage import load_canon_bundle
+from llm_call import invoke_with_retry
 
 
 def _extract(text: str) -> Dict[str, Any]:
@@ -71,8 +72,21 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                     model=model,
                     base_url=str(getattr(llm, "base_url", "") or ""),
                 ):
-                    return llm.invoke([system_msg, human_msg])
-            return llm.invoke([system_msg, human_msg])
+                    return invoke_with_retry(
+                        llm,
+                        [system_msg, human_msg],
+                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                        logger=logger,
+                        node=node_name,
+                        chapter_index=0,
+                    )
+            return invoke_with_retry(
+                llm,
+                [system_msg, human_msg],
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+            )
 
         system = SystemMessage(
             content=(

@@ -305,11 +305,13 @@ def normalize_canon_bundle(canon: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_recent_chapter_memories(
-    project_dir: str, *, before_chapter: int, k: int = 3
+    project_dir: str, *, before_chapter: int, k: int = 3, include_unapproved: bool = False
 ) -> List[Dict[str, Any]]:
     """
     读取最近 k 章的 chapter memory（从 projects/<project>/memory/chapters 下取）。
     - before_chapter：当前章号；会读取 < before_chapter 的历史记忆
+    - 默认只注入审核通过（approved=True）的记忆，避免把“失败稿/不通过稿”的摘要污染后续写作与审稿。
+    - include_unapproved=True 时会包含未通过记忆（不推荐，除非你明确知道在做什么）。
     - 只读取存在且能解析为 dict 的文件
     """
     mem_dir = os.path.join(project_dir, "memory", "chapters")
@@ -324,8 +326,13 @@ def load_recent_chapter_memories(
         name = f"{idx:03d}.memory.json"
         p = os.path.join(mem_dir, name)
         obj = read_json(p)
-        if isinstance(obj, dict) and obj:
-            out.append(obj)
+        if not (isinstance(obj, dict) and obj):
+            continue
+        # 兼容旧格式：没有 approved 字段时，视为 True（避免把历史项目直接“读不到记忆”）
+        approved = obj.get("approved", True)
+        if (approved is False) and (not include_unapproved):
+            continue
+        out.append(obj)
     return out
 
 
@@ -346,6 +353,60 @@ def build_recent_memory_synopsis(memories: List[Dict[str, Any]]) -> str:
         if len(summary) > 280:
             summary = summary[:260].rstrip() + "…"
         lines.append(f"- 第{chap}章：{summary}")
+    return "\n".join(lines).strip() or "（无）"
+
+
+def load_recent_arc_summaries(project_dir: str, *, before_chapter: int, k: int = 2) -> List[Dict[str, Any]]:
+    """
+    读取最近 k 个 Arc summaries（projects/<project>/memory/arcs/arc_XXX-YYY.json）。
+    - before_chapter：当前章号；只读取 end_chapter < before_chapter 的 arc
+    """
+    arcs_dir = os.path.join(project_dir, "memory", "arcs")
+    if not os.path.exists(arcs_dir):
+        return []
+
+    items: List[tuple[int, str]] = []
+    for name in os.listdir(arcs_dir):
+        m = re.match(r"^arc_(\d+)-(\d+)\.json$", name)
+        if not m:
+            continue
+        try:
+            end = int(m.group(2))
+        except ValueError:
+            continue
+        if end >= int(before_chapter):
+            continue
+        items.append((end, os.path.join(arcs_dir, name)))
+
+    # 最近在前
+    items.sort(key=lambda x: x[0], reverse=True)
+    out: List[Dict[str, Any]] = []
+    for _end, path in items:
+        if len(out) >= max(0, int(k)):
+            break
+        obj = read_json(path)
+        if isinstance(obj, dict) and obj:
+            out.append(obj)
+    return out
+
+
+def build_recent_arc_synopsis(arcs: List[Dict[str, Any]]) -> str:
+    """
+    将最近 Arc 摘要压缩成可注入 prompt 的文本。
+    """
+    if not arcs:
+        return "（无）"
+    lines: List[str] = []
+    # arcs 是倒序（最近在前），阅读更顺畅则反转为时间顺序
+    for a in reversed(arcs):
+        s = int(a.get("start_chapter", 0) or 0)
+        e = int(a.get("end_chapter", 0) or 0)
+        summary = str(a.get("summary", "") or "").strip()
+        if not summary:
+            continue
+        if len(summary) > 380:
+            summary = summary[:360].rstrip() + "…"
+        lines.append(f"- 第{s}~{e}章：{summary}")
     return "\n".join(lines).strip() or "（无）"
 
 

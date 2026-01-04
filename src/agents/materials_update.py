@@ -9,6 +9,7 @@ from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from storage import load_canon_bundle, normalize_canon_bundle
 from materials import materials_prompt_digest
+from llm_call import invoke_with_retry
 
 
 def _extract(text: str) -> Dict[str, Any]:
@@ -142,9 +143,22 @@ def materials_update_agent(state: StoryState) -> StoryState:
             model=model,
             base_url=str(getattr(llm, "base_url", "") or ""),
         ):
-            resp = llm.invoke([system, human])
+            resp = invoke_with_retry(
+                llm,
+                [system, human],
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                logger=logger,
+                node="materials_update",
+                chapter_index=chapter_index,
+            )
     else:
-        resp = llm.invoke([system, human])
+        resp = invoke_with_retry(
+            llm,
+            [system, human],
+            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+        )
 
     text = (getattr(resp, "content", "") or "").strip()
     if logger:

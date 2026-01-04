@@ -38,6 +38,7 @@ from agents.materials_init import materials_init_agent
 from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
+from arc_summary import generate_arc_summary, write_arc_summary
 
 
 def main():
@@ -63,6 +64,28 @@ def main():
     parser.add_argument("--output-base", type=str, default="", help="输出根目录（覆盖配置）")
     parser.add_argument("--stage", type=str, default="", help="阶段名（用于归档，覆盖配置）")
     parser.add_argument("--memory-recent-k", type=int, default=None, help="注入最近章节记忆数量（只注入梗概）")
+    parser.add_argument(
+        "--include-unapproved-memories",
+        action="store_true",
+        help="注入记忆时包含“未审核通过”的章节（默认不包含，避免污染；仅调试/强需求时使用）",
+    )
+    parser.add_argument("--style", type=str, default="", help="用户文风覆盖（本次运行注入 writer/editor；不自动写入 style.md）")
+    parser.add_argument("--style-file", type=str, default="", help="从文件读取用户文风覆盖（UTF-8），优先级高于 --style")
+    parser.add_argument("--paragraph-rules", type=str, default="", help="段落/结构规则（例如每段<=120字、多对话、少旁白等）")
+    parser.add_argument("--editor-min-issues", type=int, default=None, help="主编拒稿时至少给出多少条 issues（默认2）")
+    parser.add_argument("--editor-retry-on-invalid", type=int, default=None, help="主编 JSON 不合法/issue过少时自动修复重试次数（默认1）")
+    parser.add_argument("--stop-on-error", action="store_true", help="遇到单章异常时立即中止（默认：记录错误并继续跑后续章节）")
+    parser.add_argument("--llm-max-attempts", type=int, default=None, help="LLM调用最大重试次数（默认3，抗限流/网络抖动）")
+    parser.add_argument("--llm-retry-base-sleep-s", type=float, default=None, help="LLM重试基础退避秒数（默认1.0）")
+    parser.add_argument("--disable-arc-summary", action="store_true", help="禁用分卷/Arc摘要（默认启用，减少150章规模的记忆膨胀与矛盾）")
+    parser.add_argument("--arc-every-n", type=int, default=None, help="每N章生成一个Arc摘要（默认10；设为0表示不生成）")
+    parser.add_argument("--arc-recent-k", type=int, default=None, help="写作/审稿注入最近K个Arc摘要（默认2）")
+    parser.add_argument(
+        "--auto-apply-updates",
+        type=str,
+        default="",
+        help="无人值守：自动应用沉淀建议（off|safe）。safe 仅应用低风险补丁（world.notes/style.md + tone/outline 幂等追加）。",
+    )
     parser.add_argument("--project", type=str, default="", help="项目名（用于续写/固定 projects/<project>；建议与现有目录名一致）")
     parser.add_argument("--resume", action="store_true", help="续写模式：优先复用 projects/<project>/project_meta.json，并自动从下一章开始")
     parser.add_argument("--start-chapter", type=int, default=None, help="起始章节号（例如 101）。不填则 resume 模式自动推断为已有最大章+1")
@@ -107,6 +130,7 @@ def main():
 
     # idea 支持从文件读取（优先级最高）
     idea_from_file: str | None = None
+    idea_file_path: str = ""
     if args.idea_file and args.idea_file.strip():
         idea_path = args.idea_file.strip()
         if not os.path.isabs(idea_path):
@@ -116,8 +140,22 @@ def main():
         # 支持 UTF-8 BOM
         with open(idea_path, "r", encoding="utf-8-sig") as f:
             idea_from_file = f.read().strip()
+        idea_file_path = idea_path
         if not idea_from_file:
             raise ValueError(f"idea 文件内容为空：{idea_path}")
+
+    # style 支持从文件读取（优先级高于 --style）
+    style_from_file: str | None = None
+    if args.style_file and args.style_file.strip():
+        style_path = args.style_file.strip()
+        if not os.path.isabs(style_path):
+            style_path = os.path.join(os.path.dirname(config_abs), style_path)
+        if not os.path.exists(style_path):
+            raise FileNotFoundError(f"未找到 style 文件：{style_path}")
+        with open(style_path, "r", encoding="utf-8-sig") as f:
+            style_from_file = f.read().strip()
+        if style_from_file is not None and not style_from_file.strip():
+            style_from_file = ""
 
     settings = load_settings(
         args.config,
@@ -125,6 +163,17 @@ def main():
         output_base=args.output_base,
         stage=args.stage,
         memory_recent_k=args.memory_recent_k,
+        include_unapproved_memories=bool(args.include_unapproved_memories),
+        style_override=style_from_file if style_from_file is not None else args.style,
+        paragraph_rules=args.paragraph_rules,
+        editor_min_issues=args.editor_min_issues,
+        editor_retry_on_invalid=args.editor_retry_on_invalid,
+        llm_max_attempts=args.llm_max_attempts,
+        llm_retry_base_sleep_s=args.llm_retry_base_sleep_s,
+        enable_arc_summary=(False if bool(args.disable_arc_summary) else None),
+        arc_every_n=args.arc_every_n,
+        arc_recent_k=args.arc_recent_k,
+        auto_apply_updates=args.auto_apply_updates,
         target_words=args.target_words,
         chapters=args.chapters,
         max_rewrites=args.max_rewrites,
@@ -285,6 +334,9 @@ def main():
     # 初始化 state（先跑策划一次 / 或 resume 复用）
     base_state: StoryState = {
         "user_input": settings.idea,
+        # idea-file 模式：把原始文本也塞进 state，交给 planner 做结构化抽取/合并
+        "idea_source_text": str(idea_from_file or ""),
+        "idea_file_path": str(idea_file_path or ""),
         "target_words": int(settings.gen.target_words),
         "max_rewrites": int(settings.gen.max_rewrites),
         "chapters_total": int(settings.gen.chapters),
@@ -297,6 +349,17 @@ def main():
         "output_dir": current_dir,
         "stage": settings.stage,
         "memory_recent_k": int(settings.memory_recent_k),
+        "include_unapproved_memories": bool(settings.include_unapproved_memories),
+        "style_override": str(settings.style_override or ""),
+        "paragraph_rules": str(settings.paragraph_rules or ""),
+        "editor_min_issues": int(settings.editor_min_issues),
+        "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
+        "llm_max_attempts": int(settings.llm_max_attempts),
+        "llm_retry_base_sleep_s": float(settings.llm_retry_base_sleep_s),
+        "enable_arc_summary": bool(settings.enable_arc_summary),
+        "arc_every_n": int(settings.arc_every_n),
+        "arc_recent_k": int(settings.arc_recent_k),
+        "auto_apply_updates": str(settings.auto_apply_updates or "off"),
         "planner_tasks": settings.planner_tasks or [],
     }
 
@@ -414,6 +477,20 @@ def main():
             "debug": bool(settings.debug),
             "project_name": str(project_name or ""),
             "project_dir": os.path.relpath(project_dir, output_base).replace("\\", "/"),
+            "idea_file_path": str(idea_file_path or ""),
+            "memory_recent_k": int(settings.memory_recent_k),
+            "include_unapproved_memories": bool(settings.include_unapproved_memories),
+            # 注意：style/paragraph 可能来自 idea-file 的点子包解析（planner 内回填），这里记录“生效值”而非仅 settings
+            "style_override": str(planned_state.get("style_override", "") or settings.style_override or ""),
+            "paragraph_rules": str(planned_state.get("paragraph_rules", "") or settings.paragraph_rules or ""),
+            "editor_min_issues": int(settings.editor_min_issues),
+            "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
+            "llm_max_attempts": int(settings.llm_max_attempts),
+            "llm_retry_base_sleep_s": float(settings.llm_retry_base_sleep_s),
+            "enable_arc_summary": bool(settings.enable_arc_summary),
+            "arc_every_n": int(settings.arc_every_n),
+            "arc_recent_k": int(settings.arc_recent_k),
+            "auto_apply_updates": str(settings.auto_apply_updates or "off"),
         },
     )
 
@@ -453,28 +530,75 @@ def main():
             "project_dir": project_dir,
             "stage": settings.stage,
             "memory_recent_k": int(settings.memory_recent_k),
+            "include_unapproved_memories": bool(settings.include_unapproved_memories),
+            "style_override": str(settings.style_override or ""),
+            "paragraph_rules": str(settings.paragraph_rules or ""),
+            "editor_min_issues": int(settings.editor_min_issues),
+            "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
+            "llm_max_attempts": int(settings.llm_max_attempts),
+            "llm_retry_base_sleep_s": float(settings.llm_retry_base_sleep_s),
+            "enable_arc_summary": bool(settings.enable_arc_summary),
+            "arc_every_n": int(settings.arc_every_n),
+            "arc_recent_k": int(settings.arc_recent_k),
+            "auto_apply_updates": str(settings.auto_apply_updates or "off"),
         }
         logger.event("chapter_start", chapter_index=idx)
-        final_state = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
-        last_state = final_state
+        chap_id = f"{idx:03d}"
+        final_state: StoryState | None = None
+        try:
+            final_state = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
+            last_state = final_state
+        except Exception as e:
+            # 关键稳定性：单章失败不拖死整次批量生成
+            import traceback as _tb
+
+            err = {
+                "chapter_index": idx,
+                "error_type": e.__class__.__name__,
+                "error": str(e),
+                "traceback": "".join(_tb.format_exception(type(e), e, e.__traceback__))[:20000],
+            }
+            try:
+                logger.event(
+                    "chapter_error",
+                    chapter_index=idx,
+                    error_type=err["error_type"],
+                    error=err["error"],
+                )
+            except Exception:
+                pass
+            try:
+                write_json(os.path.join(chapters_dir_current, f"{chap_id}.error.json"), err)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            if bool(args.stop_on_error):
+                raise
+            # 继续下一章
+            continue
         logger.event(
             "chapter_end",
             chapter_index=idx,
-            writer_used_llm=bool(final_state.get("writer_used_llm", False)),
-            editor_used_llm=bool(final_state.get("editor_used_llm", False)),
-            editor_decision=str(final_state.get("editor_decision", "")),
-            writer_chars=len(final_state.get("writer_result", "") or ""),
+            writer_used_llm=bool((final_state or {}).get("writer_used_llm", False)),
+            editor_used_llm=bool((final_state or {}).get("editor_used_llm", False)),
+            editor_decision=str((final_state or {}).get("editor_decision", "")),
+            writer_chars=len((final_state or {}).get("writer_result", "") or ""),
         )
 
         # 每章落盘
-        chap_id = f"{idx:03d}"
-        write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), final_state.get("writer_result", ""))
-        decision = final_state.get("editor_decision", "")
-        feedback = final_state.get("editor_feedback", [])
-        editor_report = final_state.get("editor_report") or {}
-        canon_suggestions = final_state.get("canon_suggestions") or []
-        canon_update_suggestions = final_state.get("canon_update_suggestions") or []
-        materials_update_suggestions = final_state.get("materials_update_suggestions") or []
+        try:
+            write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), (final_state or {}).get("writer_result", ""))
+        except Exception:
+            # 落盘失败也不应该拖死整次运行
+            if bool(args.stop_on_error):
+                raise
+            continue
+
+        decision = (final_state or {}).get("editor_decision", "")
+        feedback = (final_state or {}).get("editor_feedback", [])
+        editor_report = (final_state or {}).get("editor_report") or {}
+        canon_suggestions = (final_state or {}).get("canon_suggestions") or []
+        canon_update_suggestions = (final_state or {}).get("canon_update_suggestions") or []
+        materials_update_suggestions = (final_state or {}).get("materials_update_suggestions") or []
         if decision == "审核通过":
             write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
         else:
@@ -504,11 +628,119 @@ def main():
             )
 
         # chapter memory：写入 current + 持久化 projects
-        mem = final_state.get("chapter_memory") or {}
+        mem = (final_state or {}).get("chapter_memory") or {}
         if isinstance(mem, dict) and mem:
             write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem)
             # 持久化：项目的 chapter memories
             write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem)
+
+        # === 无人值守：安全自动应用沉淀建议（让后续章节立即受益） ===
+        try:
+            mode = str(settings.auto_apply_updates or "off").strip().lower()
+            if mode == "safe":
+                # 1) materials_patch（安全幂等追加）——直接应用到 projects/<project>/materials
+                mats_items: list[dict] = []
+                if isinstance(materials_update_suggestions, list):
+                    for it in materials_update_suggestions:
+                        if not isinstance(it, dict):
+                            continue
+                        act = str(it.get("action", "") or "").strip()
+                        if act == "materials_patch":
+                            mats_items.append(it)
+                mats_stats = {"applied": 0, "skipped": 0, "backups": []}
+                if mats_items:
+                    mats_stats = apply_materials_suggestions(project_dir=project_dir, items=mats_items, yes=True, dry_run=False)
+
+                # 2) canon_patch（严格白名单：只允许 world.notes / style.md 追加）
+                canon_items_all: list[dict] = []
+                for arr in (canon_suggestions, canon_update_suggestions, materials_update_suggestions):
+                    if isinstance(arr, list):
+                        for it in arr:
+                            if isinstance(it, dict):
+                                canon_items_all.append(it)
+
+                def _is_safe_canon_patch(it: dict) -> bool:
+                    act = str(it.get("action", "") or "").strip()
+                    if act != "canon_patch":
+                        return False
+                    cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
+                    target = str(cp.get("target", "") or "").strip()
+                    op = str(cp.get("op", "") or "").strip()
+                    path = str(cp.get("path", "") or "").strip()
+                    if target == "world.json" and op == "note" and (path in ("notes", "")):
+                        return True
+                    if target == "style.md" and op == "append":
+                        return True
+                    return False
+
+                canon_items = [it for it in canon_items_all if _is_safe_canon_patch(it)]
+                canon_stats = {"applied": 0, "skipped": 0, "backups": []}
+                if canon_items:
+                    canon_stats = apply_canon_suggestions(project_dir=project_dir, items=canon_items, yes=True, dry_run=False)
+
+                write_json(
+                    os.path.join(chapters_dir_current, f"{chap_id}.auto_apply.json"),
+                    {
+                        "mode": mode,
+                        "materials": {"items": len(mats_items), "stats": mats_stats},
+                        "canon": {"items": len(canon_items), "stats": canon_stats},
+                    },
+                )
+                try:
+                    logger.event(
+                        "auto_apply_updates",
+                        chapter_index=idx,
+                        mode=mode,
+                        materials_items=len(mats_items),
+                        canon_items=len(canon_items),
+                        materials_applied=int(mats_stats.get("applied", 0) or 0),
+                        canon_applied=int(canon_stats.get("applied", 0) or 0),
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            # 自动应用失败不阻断批量生成
+            try:
+                logger.event("auto_apply_error", chapter_index=idx, error_type=e.__class__.__name__, error=str(e))
+            except Exception:
+                pass
+
+        # === Arc summaries：每 N 章生成一次“中程摘要”，用于 150 章规模控制 prompt 膨胀与长程一致性 ===
+        try:
+            enable_arc = bool(settings.enable_arc_summary)
+            every_n = int(settings.arc_every_n)
+            if enable_arc and llm and every_n > 0 and (idx % every_n == 0):
+                start_arc = max(1, idx - every_n + 1)
+                arc_name = f"arc_{start_arc:03d}-{idx:03d}.json"
+                arc_path = os.path.join(project_dir, "memory", "arcs", arc_name)
+                if not os.path.exists(arc_path):
+                    arc = generate_arc_summary(
+                        llm=llm,
+                        project_dir=project_dir,
+                        start_chapter=start_arc,
+                        end_chapter=idx,
+                        logger=logger,
+                        llm_max_attempts=int(settings.llm_max_attempts),
+                        llm_retry_base_sleep_s=float(settings.llm_retry_base_sleep_s),
+                    )
+                    if isinstance(arc, dict) and arc:
+                        p = write_arc_summary(project_dir, start_arc, idx, arc)
+                        try:
+                            logger.event(
+                                "arc_summary_written",
+                                chapter_index=idx,
+                                start_chapter=start_arc,
+                                end_chapter=idx,
+                                path=os.path.relpath(p, output_base).replace("\\", "/"),
+                            )
+                        except Exception:
+                            pass
+        except Exception as e:
+            # Arc 摘要失败不应阻断批量生成
+            try:
+                logger.event("arc_summary_error", chapter_index=idx, error_type=e.__class__.__name__, error=str(e))
+            except Exception:
+                pass
 
     # 控制台输出
     print("=== Planner Result ===")

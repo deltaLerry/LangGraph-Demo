@@ -11,6 +11,7 @@ import os
 from storage import load_canon_bundle, read_json, write_json, write_text
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
+from llm_call import invoke_with_retry
 
 
 def _is_placeholder_world(world: Dict[str, Any]) -> bool:
@@ -146,9 +147,22 @@ def canon_init_agent(state: StoryState) -> StoryState:
                     model=model,
                     base_url=str(getattr(llm, "base_url", "") or ""),
                 ):
-                    resp0 = llm.invoke([system_msg, human_msg])
+                    resp0 = invoke_with_retry(
+                        llm,
+                        [system_msg, human_msg],
+                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                        logger=logger,
+                        node=node_name,
+                        chapter_index=chapter_index,
+                    )
             else:
-                resp0 = llm.invoke([system_msg, human_msg])
+                resp0 = invoke_with_retry(
+                    llm,
+                    [system_msg, human_msg],
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                )
             text0 = (getattr(resp0, "content", "") or "").strip()
             fr0, usage0 = extract_finish_reason_and_usage(resp0)
             if logger:

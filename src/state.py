@@ -18,6 +18,34 @@ class StoryState(TypedDict, total=False):
     stage: str
     # 写作/审核注入最近章节记忆数量（只用梗概 summary）
     memory_recent_k: int
+    # 是否允许注入“未审核通过”的章节记忆（默认 False，避免污染）
+    include_unapproved_memories: bool
+
+    # 用户风格覆盖/段落规则（便于无需手改 style.md 就能控制文风与段落结构）
+    style_override: str
+    paragraph_rules: str
+
+    # idea-file 点子包原文与解析结果（用于追溯/调试）
+    idea_source_text: str
+    idea_file_path: str
+    idea_intake: Dict[str, Any]
+    project_name_hint: str
+
+    # editor 稳定性参数
+    editor_min_issues: int
+    editor_retry_on_invalid: int
+
+    # LLM 调用重试（抗网络/限流抖动）
+    llm_max_attempts: int
+    llm_retry_base_sleep_s: float
+
+    # Arc summaries（中程记忆）
+    enable_arc_summary: bool
+    arc_every_n: int
+    arc_recent_k: int
+
+    # 无人值守：自动应用沉淀建议（off/safe）
+    auto_apply_updates: str
 
     # Canon 初始化（阶段2.2）
     canon_init_used_llm: bool

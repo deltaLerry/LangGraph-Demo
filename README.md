@@ -148,6 +148,100 @@ python src\main.py --config config.toml
 - `--idea-file path/to/idea.txt`：从文件读取用户点子（UTF-8），优先级最高（覆盖 `--idea/config/env`）
 - `--stage stage1`：归档阶段名（用于 `stages/<stage>/...`）
 - `--memory-recent-k 3`：注入最近章节“梗概记忆”的数量（只注入 summary）
+- `--include-unapproved-memories`：注入记忆时包含“未审核通过”的章节（默认不包含，避免污染；仅调试时用）
+- `--style "..."` / `--style-file path/to/style.txt`：本次运行的文风覆盖（注入 writer/editor；不自动写入 `canon/style.md`）
+- `--paragraph-rules "..."`：段落/结构规则（例如每段<=120字、多对话、少旁白等）
+- `--editor-min-issues 2`：主编拒稿时至少给出多少条 issues（默认2）
+- `--editor-retry-on-invalid 1`：主编 JSON 不合法/issue过少时自动修复重试次数（默认1）
+- `--stop-on-error`：遇到单章异常时立即中止（默认：记录错误并继续跑后续章节，适合后台批量生成）
+- `--llm-max-attempts 3` / `--llm-retry-base-sleep-s 1.0`：LLM 调用重试（抗限流/网络抖动，适合无人值守批量生成）
+- `--disable-arc-summary`：禁用分卷/Arc摘要（默认启用）
+- `--arc-every-n 10`：每 N 章生成一个 Arc 摘要（默认10，设为0等同禁用生成）
+- `--arc-recent-k 2`：写作/审稿注入最近 K 个 Arc 摘要（默认2）
+- `--auto-apply-updates safe`：无人值守自动应用沉淀建议（默认 off）。safe 只自动应用低风险补丁（`world.notes`/`style.md` 追加 + `materials` 幂等追加），便于 150 章批量生成时逐章增强一致性。
+
+## idea-file「点子包」格式（推荐）
+你可以把**项目名/文风/段落规则/点子正文**写在同一个文件里交给策划（planner）解析并注入工作流。
+
+示例：`examples/idea_pack_example.txt`
+
+## 无人值守批量生成（后台运行）
+目标：**除了准备好 `--idea-file` 与 LLM 配置外，不需要人工参与**，可后台连续生成（例如 150 章 × 5000 字）。
+
+### 前置条件
+- **LLM 已配置**：推荐用 `.env` 或 `config.toml` 的 `[llm]`（示例见本文上方“最小配置示例”）。
+- **点子包文件**：推荐按 `examples/idea_pack_example.txt` 的格式写（可含项目名/文风/段落规则/点子）。
+
+### 推荐：无人值守批量生成（稳 + 可追溯 + 低风险自动沉淀）
+特点：
+- **默认不停机**：单章异常会落盘 `chapters/XXX.error.json` 并继续后续章节（避免长跑“全盘崩”）。
+- **自动沉淀（safe）**：逐章把低风险建议写回项目资产，后续章节立刻受益（减少长程矛盾）。
+
+PowerShell 示例（把路径/项目名改成你的）：
+
+```bash
+python src\main.py ^
+  --config "config.toml" ^
+  --llm-mode llm ^
+  --idea-file "D:\path\to\idea_pack.txt" ^
+  --project "你的项目名" ^
+  --target-words 5000 ^
+  --chapters 150 ^
+  --max-rewrites 1 ^
+  --editor-min-issues 2 ^
+  --editor-retry-on-invalid 1 ^
+  --llm-max-attempts 3 ^
+  --llm-retry-base-sleep-s 10.0 ^
+  --memory-recent-k 3 ^
+  --arc-every-n 10 ^
+  --arc-recent-k 2 ^
+  --auto-apply-updates safe ^
+  --debug ^
+  --archive ^
+  --yes
+```
+
+说明：
+- `--auto-apply-updates safe`：只自动应用低风险补丁（`world.notes`/`style.md` 追加 + `materials` 幂等追加）。
+- `--archive --yes`：运行结束自动归档（无人值守不弹确认）。
+
+### 更严格：遇到异常立即中止（省成本，适合“必须 0 故障”）
+
+```bash
+python src\main.py ^
+  --config "config.toml" ^
+  --llm-mode llm ^
+  --idea-file "D:\path\to\idea_pack.txt" ^
+  --project "你的项目名" ^
+  --target-words 5000 ^
+  --chapters 150 ^
+  --max-rewrites 1 ^
+  --auto-apply-updates safe ^
+  --stop-on-error ^
+  --debug ^
+  --archive ^
+  --yes
+```
+
+### 真后台运行（PowerShell，输出重定向到文件）
+不会占用当前窗口；stdout/stderr 写入日志文件，便于排障。
+
+```bash
+Start-Process -NoNewWindow -FilePath python -ArgumentList @(
+  "src\main.py",
+  "--config","config.toml",
+  "--llm-mode","llm",
+  "--idea-file","D:\path\to\idea_pack.txt",
+  "--project","你的项目名",
+  "--target-words","5000",
+  "--chapters","150",
+  "--max-rewrites","1",
+  "--auto-apply-updates","safe",
+  "--debug",
+  "--archive",
+  "--yes"
+) -RedirectStandardOutput "outputs\batch_stdout.log" -RedirectStandardError "outputs\batch_stderr.log"
+```
 - `--archive`：运行结束后自动归档（默认不归档，建议先 review）
 - `--archive-only`：只归档当前 `outputs/current`（review 通过后手动入库）
 - `--project "<name>"`：指定项目名（用于续写/固定 `projects/<project>`）
@@ -225,6 +319,11 @@ python src\main.py --archive-only
 ```bash
 python src\main.py --apply-canon-suggestions --archive --yes
 ```
+
+## Windows PowerShell 小贴士（避免命令行引号坑）
+如果你的 `--style/--paragraph-rules` 里包含很多双引号/特殊符号，PowerShell 可能会解析出错。更稳的做法：
+- 用单引号包住参数值：`--style 'xxx'`
+- 或用文件：`--style-file path/to/style.txt`
 
 ## 续写（例如已有100章，继续写第101章）
 

@@ -7,9 +7,11 @@ from typing import Any, Dict, List, Tuple
 from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories, normalize_canon_bundle
+from storage import build_recent_arc_synopsis, load_recent_arc_summaries
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from materials import materials_prompt_digest
+from llm_call import invoke_with_retry
 
 
 def _extract_first_json_obj(text: str) -> Dict[str, Any]:
@@ -68,7 +70,17 @@ def editor_agent(state: StoryState) -> StoryState:
         canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
         canon = normalize_canon_bundle(canon0)
         k = int(state.get("memory_recent_k", 3) or 3)
-        recent_memories = load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k) if project_dir else []
+        include_unapproved = bool(state.get("include_unapproved_memories", False))
+        recent_memories = (
+            load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k, include_unapproved=include_unapproved)
+            if project_dir
+            else []
+        )
+        arc_text = ""
+        if bool(state.get("enable_arc_summary", True)) and project_dir:
+            arc_k = int(state.get("arc_recent_k", 2) or 2)
+            arcs = load_recent_arc_summaries(project_dir, before_chapter=chapter_index, k=arc_k)
+            arc_text = truncate_text(build_recent_arc_synopsis(arcs), max_chars=1400)
         canon_text = truncate_text(
             json.dumps(
                 {
@@ -90,6 +102,8 @@ def editor_agent(state: StoryState) -> StoryState:
         if isinstance(materials_bundle, dict) and materials_bundle:
             materials_text = materials_prompt_digest(materials_bundle, chapter_index=chapter_index)
 
+        user_style = truncate_text(str(state.get("style_override", "") or "").strip(), max_chars=1200)
+        paragraph_rules = truncate_text(str(state.get("paragraph_rules", "") or "").strip(), max_chars=800)
         system = SystemMessage(
             content=(
                 "你是苛刻的编辑部主编，负责最终稿件质量拍板。\n"
@@ -100,13 +114,15 @@ def editor_agent(state: StoryState) -> StoryState:
                 "1) Canon 设定（world/characters/timeline/style）：真值来源，任何冲突都算硬伤\n"
                 "2) 阶段3【材料包】（人物卡/本章细纲/基调）：必须遵循；但不得覆盖 Canon\n"
                 "3) 最近章节记忆：用于连续性；若与 Canon 冲突，以 Canon 为准\n"
-                "4) planner 任务：仅参考\n"
+                "4) 用户风格覆盖/段落规则：若不与 Canon 冲突，优先执行\n"
+                "5) planner 任务：仅参考\n"
                 "\n"
                 "判定标准（更严格、更有效）：只要命中任一条“硬伤”，必须判定为 审核不通过：\n"
                 "- Canon 冲突：事实/规则/角色禁忌/能力/时间线与 Canon 明确不一致\n"
                 "- 细纲违背：材料包里“本章 goal/conflict/beats/ending_hook”有明确要求但正文未体现，或推进顺序/因果链明显不成立\n"
                 "- 人物不一致：人物言行与人物卡（traits/motivation/taboos）冲突；或关键动机缺失导致行为无因\n"
                 "- 内部逻辑漏洞：同章内自相矛盾（上一段说A，下一段说非A）、关键转折缺铺垫、因果断裂\n"
+                "- 命名漂移：正文引入大量新专有名词（门派/功法/地名/组织/物品等）且不在 Canon/材料包/已知名词清单中\n"
                 "- 风格硬伤：明显 AI 总结腔/元话语（例如“作为AI/接下来将…”）、句式机械重复、百科式灌设定导致叙事停滞\n"
                 "- 字数硬约束：明显偏离目标区间（过短导致情节不完整/过长导致拖沓）\n"
                 "\n"
@@ -115,6 +131,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 "- 每条 issue 必须“具体可执行”：指出哪里错 + 为什么错 + 怎么改（改法要能直接照做）。\n"
                 "- 每条 issue 必须包含 quote：从正文原样复制一小段，能定位到问题。\n"
                 "- 若你找不到可引用 quote，就不要输出该条（宁可少而准）。\n"
+                "- issues 请按严重程度从高到低排序（先硬伤后软伤）。\n"
                 "\n"
                 "输出 JSON schema：\n"
                 "{\n"
@@ -143,20 +160,26 @@ def editor_agent(state: StoryState) -> StoryState:
             content=(
                 f"项目名称：{project_name}\n"
                 f"章节：第{chapter_index}章\n"
-                + (f"目标字数：{int(state.get('target_words', 800) or 800)}（约束区间：{int(int(state.get('target_words', 800) or 800)*0.85)}~{int(int(state.get('target_words', 800) or 800)*1.15)}）\n" if True else "")
-                f"策划任务（参考）：{planner_result}\n\n"
+                + (
+                    f"目标字数：{int(state.get('target_words', 800) or 800)}"
+                    f"（约束区间：{int(int(state.get('target_words', 800) or 800)*0.85)}~{int(int(state.get('target_words', 800) or 800)*1.15)}）\n"
+                )
+                + f"策划任务（参考）：{planner_result}\n\n"
                 "【Canon 设定（真值来源）】\n"
                 f"{canon_text}\n\n"
                 "【文风约束】\n"
                 f"{style_text}\n\n"
+                + (("【用户风格覆盖（不与 Canon 冲突时优先执行）】\n" + user_style + "\n\n") if user_style else "")
+                + (("【段落/结构约束（不与 Canon 冲突时优先执行）】\n" + paragraph_rules + "\n\n") if paragraph_rules else "")
                 + (
                     ("【阶段3材料包（若提供则用于对照本章细纲/人物卡/基调；不得覆盖 Canon）】\n" + materials_text + "\n\n")
                     if materials_text
                     else ""
                 )
+                + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
                 + "【最近章节记忆（参考）】\n"
                 f"{memories_text}\n\n"
-                "正文：\n"
+                + "正文：\n"
                 f"{writer_result}\n"
             )
         )
@@ -169,9 +192,22 @@ def editor_agent(state: StoryState) -> StoryState:
                 model=model,
                 base_url=str(getattr(llm, "base_url", "") or ""),
             ):
-                resp = llm.invoke([system, human])
+                resp = invoke_with_retry(
+                    llm,
+                    [system, human],
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    logger=logger,
+                    node="editor",
+                    chapter_index=state.get("chapter_index", 1),
+                )
         else:
-            resp = llm.invoke([system, human])
+            resp = invoke_with_retry(
+                llm,
+                [system, human],
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+            )
         text = (getattr(resp, "content", "") or "").strip()
         if logger:
             finish_reason, token_usage = extract_finish_reason_and_usage(resp)
@@ -183,15 +219,88 @@ def editor_agent(state: StoryState) -> StoryState:
                 finish_reason=finish_reason,
                 token_usage=token_usage,
             )
-        # 优先按 JSON 解析（推荐路径）
-        report = _extract_first_json_obj(text)
-        decision = str(report.get("decision", "") or "").strip()
-        issues_obj = report.get("issues")
-        issues_list: List[Dict[str, Any]] = [x for x in issues_obj if isinstance(x, dict)] if isinstance(issues_obj, list) else []
+        # === 解析与稳定性：不再让“JSON输出不合规”直接崩溃整条流水线 ===
+        # 目标：让系统可持续产出（即使主编输出格式偶发异常），并为后续排障保留日志/上下文。
+        editor_min_issues = max(0, int(state.get("editor_min_issues", 2) or 2))
+        retry_on_invalid = max(0, int(state.get("editor_retry_on_invalid", 1) or 1))
 
-        # 最新设计：LLM 必须输出严格 JSON；无法解析/字段不合法则直接报错（尽早暴露问题）
+        def _parse_report(t: str) -> tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+            rep = _extract_first_json_obj(t) or {}
+            dec = str(rep.get("decision", "") or "").strip()
+            iss_obj = rep.get("issues")
+            iss_list: List[Dict[str, Any]] = [x for x in iss_obj if isinstance(x, dict)] if isinstance(iss_obj, list) else []
+            return dec, iss_list, rep
+
+        decision, issues_list, report = _parse_report(text)
+
+        need_retry = False
+        invalid = decision not in ("审核通过", "审核不通过")
+        if invalid:
+            need_retry = True
+        if (not invalid) and decision == "审核不通过" and editor_min_issues > 0 and len(issues_list) < editor_min_issues:
+            need_retry = True
+
+        # 可选二次重试：让 LLM “修复 JSON / 补齐 issues”，提升一次过审与稳定性
+        if need_retry and retry_on_invalid > 0:
+            try:
+                fix_system = SystemMessage(
+                    content=(
+                        "你是 JSON 修复器。请把给定的主编输出修复为一个严格 JSON 对象，且符合 schema。\n"
+                        "必须且仅输出 JSON（不要解释/不要 markdown）。\n"
+                        "要求：\n"
+                        f"- decision 必须是 审核通过 或 审核不通过\n"
+                        f"- 若 decision=审核不通过，issues 至少 {editor_min_issues} 条（每条必须有 quote/issue/fix/action）\n"
+                    )
+                )
+                fix_human = HumanMessage(
+                    content=(
+                        "原始主编输出：\n"
+                        f"{truncate_text(text, max_chars=12000)}\n\n"
+                        "请输出修复后的 JSON："
+                    )
+                )
+                resp_fix = invoke_with_retry(
+                    llm,
+                    [fix_system, fix_human],
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    logger=logger,
+                    node="editor_fix_json",
+                    chapter_index=state.get("chapter_index", 1),
+                )
+                text_fix = (getattr(resp_fix, "content", "") or "").strip()
+                d2, i2, r2 = _parse_report(text_fix)
+                if d2 in ("审核通过", "审核不通过"):
+                    decision, issues_list, report = d2, i2, r2
+                    if logger:
+                        fr2, usage2 = extract_finish_reason_and_usage(resp_fix)
+                        logger.event(
+                            "llm_response",
+                            node="editor_fix_json",
+                            chapter_index=state.get("chapter_index", 1),
+                            content=truncate_text(text_fix, max_chars=getattr(logger, "max_chars", 20000)),
+                            finish_reason=fr2,
+                            token_usage=usage2,
+                        )
+            except Exception:
+                # 任何修复失败都不应阻断主流程；走兜底
+                pass
+
+        # 最终兜底：仍然不合法就降级为“审核不通过 + 结构化最小问题”，避免整次运行退出
         if decision not in ("审核通过", "审核不通过"):
-            raise ValueError("editor_agent: LLM 输出不是合法的 editor_report JSON（decision 需为 审核通过/审核不通过）")
+            decision = "审核不通过"
+            issues_list = [
+                {
+                    "type": "readability",
+                    "canon_key": "N/A",
+                    "quote": "",
+                    "issue": "主编输出格式不合法（未能解析为符合 schema 的 JSON）。请主编重新给出严格 JSON 报告。",
+                    "fix": "严格按 schema 输出 decision 与 issues；decision=审核不通过 时给出至少2条可执行 issue，并包含 quote。",
+                    "action": "rewrite",
+                    "canon_patch": {"target": "N/A", "op": "N/A", "path": "N/A", "value": "N/A"},
+                }
+            ]
+            report = {"decision": decision, "issues": issues_list}
 
         state["editor_report"] = {"decision": decision, "issues": issues_list}
         state["editor_decision"] = decision

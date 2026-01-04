@@ -11,6 +11,35 @@ stage = "stage1"
 # 写作/审核时注入“最近章节记忆”的数量（只注入梗概 summary）
 memory_recent_k = 3
 
+# 是否允许注入“未审核通过”的章节记忆（默认 false，避免污染后续写作/审稿）
+# include_unapproved_memories = false
+
+# 用户文风覆盖（本次运行注入 writer/editor；不自动写入 canon/style.md）
+# style_override = ""
+
+# 段落/结构规则（例如：每段<=120字；对话占比>40%；不要总结句）
+# paragraph_rules = ""
+
+# editor 稳定性参数
+# - editor_min_issues：主编拒稿时至少给出多少条 issues（默认2）
+# - editor_retry_on_invalid：主编 JSON 不合法/issue过少时自动修复重试次数（默认1）
+# editor_min_issues = 2
+# editor_retry_on_invalid = 1
+
+# LLM 调用重试（抗网络/限流抖动；适合无人值守批量生成）
+# llm_max_attempts = 3
+# llm_retry_base_sleep_s = 10.0
+
+# Arc summaries（中程记忆）：每 N 章生成一个“分卷摘要”，写作/审稿时注入最近 K 个，用于 150 章规模控制矛盾与 token
+# enable_arc_summary = true
+# arc_every_n = 10
+# arc_recent_k = 2
+
+# 无人值守：自动应用沉淀建议（默认 off）
+# - off：不自动应用（人工 review→确认→应用）
+# - safe：只自动应用低风险补丁（world.notes/style.md + materials 幂等追加）
+# auto_apply_updates = "off"
+
 # 运行模式：
 # - "template"：强制模板（用于纯工作流验证，不走LLM）
 # - "llm"：强制LLM（未配置LLM时将报错）

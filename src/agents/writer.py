@@ -4,9 +4,17 @@ import json
 
 from state import StoryState
 from debug_log import truncate_text
-from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories, normalize_canon_bundle
+from storage import (
+    build_recent_arc_synopsis,
+    build_recent_memory_synopsis,
+    load_canon_bundle,
+    load_recent_arc_summaries,
+    load_recent_chapter_memories,
+    normalize_canon_bundle,
+)
 from llm_meta import extract_finish_reason_and_usage
 from materials import materials_prompt_digest
+from llm_call import invoke_with_retry
 
 def writer_agent(state: StoryState) -> StoryState:
     """
@@ -63,7 +71,17 @@ def writer_agent(state: StoryState) -> StoryState:
         canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
         canon = normalize_canon_bundle(canon0)
         k = int(state.get("memory_recent_k", 3) or 3)
-        recent_memories = load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k) if project_dir else []
+        include_unapproved = bool(state.get("include_unapproved_memories", False))
+        recent_memories = (
+            load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k, include_unapproved=include_unapproved)
+            if project_dir
+            else []
+        )
+        arc_text = ""
+        if bool(state.get("enable_arc_summary", True)) and project_dir:
+            arc_k = int(state.get("arc_recent_k", 2) or 2)
+            arcs = load_recent_arc_summaries(project_dir, before_chapter=chapter_index, k=arc_k)
+            arc_text = truncate_text(build_recent_arc_synopsis(arcs), max_chars=1400)
         canon_text = truncate_text(
             json.dumps(
                 {
@@ -123,6 +141,8 @@ def writer_agent(state: StoryState) -> StoryState:
             except Exception:
                 return "（无法提取 Canon 名词；请尽量避免新增硬设定名词）"
 
+        user_style = str(state.get("style_override", "") or "").strip()
+        paragraph_rules = str(state.get("paragraph_rules", "") or "").strip()
         sync_digest = (
             "【会议同步（写前对齐）｜主编验收清单】\n"
             "- 字数：严格控制在区间内；接近上限要主动收束并结尾。\n"
@@ -133,6 +153,10 @@ def writer_agent(state: StoryState) -> StoryState:
             "\n【Canon 已知专有名词（尽量只用这些）】\n"
             f"{_canon_names()}\n"
         )
+        if user_style:
+            sync_digest += "\n【用户风格覆盖（最高优先级；不允许与 Canon 冲突）】\n" + truncate_text(user_style, max_chars=1200) + "\n"
+        if paragraph_rules:
+            sync_digest += "\n【段落/结构约束（尽量遵守）】\n" + truncate_text(paragraph_rules, max_chars=800) + "\n"
 
         if is_rewrite:
             system = SystemMessage(
@@ -142,6 +166,8 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
+                    "命名纪律（长跑一致性关键）：除非 Canon/材料包/已知专有名词清单里已有，否则不要新增门派/功法/地名/组织/物品等专有名词；必须引入新概念时，用模糊描述，不要起新名字。\n"
+                    "长章结构（面向可交付）：用“场景推进”写作，每个场景必须有冲突/信息/选择的推进；结尾必须有可承接的钩子。\n"
                     "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要额外说明。"
@@ -163,9 +189,10 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
                     f"{style_text}\n\n"
-                    "【最近章节记忆（参考，避免矛盾）】\n"
+                    + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
+                    + "【最近章节记忆（参考，避免矛盾）】\n"
                     f"{memories_text}\n\n"
-                    "主编修改意见：\n"
+                    + "主编修改意见：\n"
                     + "\n".join([f"- {x}" for x in feedback])
                     + "\n\n"
                     "请给出重写后的完整正文："
@@ -179,6 +206,8 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
+                    "命名纪律（长跑一致性关键）：除非 Canon/材料包/已知专有名词清单里已有，否则不要新增门派/功法/地名/组织/物品等专有名词；必须引入新概念时，用模糊描述，不要起新名字。\n"
+                    "长章结构（面向可交付）：用“场景推进”写作，每个场景必须有冲突/信息/选择的推进；结尾必须有可承接的钩子。\n"
                     "额外要求：请遵守“会议同步（写前对齐）｜主编验收清单”，目标是一次过审。\n"
                     "写作策略：写到字数区间上限附近请主动收束并结尾，不要超出上限。\n"
                     "只输出正文，不要标题以外的任何说明。"
@@ -200,9 +229,10 @@ def writer_agent(state: StoryState) -> StoryState:
                     f"{canon_text}\n\n"
                     "【文风约束（必须遵守）】\n"
                     f"{style_text}\n\n"
-                    "【最近章节记忆（参考，避免矛盾）】\n"
+                    + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
+                    + "【最近章节记忆（参考，避免矛盾）】\n"
                     f"{memories_text}\n\n"
-                    "请直接输出正文："
+                    + "请直接输出正文："
                 )
             )
         if logger:
@@ -215,9 +245,23 @@ def writer_agent(state: StoryState) -> StoryState:
                 base_url=str(getattr(llm, "base_url", "") or ""),
                 extra={"writer_version": writer_version, "is_rewrite": is_rewrite},
             ):
-                resp = llm.invoke([system, human])
+                resp = invoke_with_retry(
+                    llm,
+                    [system, human],
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    logger=logger,
+                    node="writer",
+                    chapter_index=chapter_index,
+                    extra={"writer_version": writer_version, "is_rewrite": is_rewrite},
+                )
         else:
-            resp = llm.invoke([system, human])
+            resp = invoke_with_retry(
+                llm,
+                [system, human],
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+            )
         text0 = (getattr(resp, "content", "") or "").strip()
         finish_reason, token_usage = extract_finish_reason_and_usage(resp)
         state["writer_result"] = text0
@@ -280,9 +324,23 @@ def writer_agent(state: StoryState) -> StoryState:
                         base_url=str(getattr(llm, "base_url", "") or ""),
                         extra={"writer_version": writer_version},
                     ):
-                        resp2 = llm.invoke([system2, human2])
+                        resp2 = invoke_with_retry(
+                            llm,
+                            [system2, human2],
+                            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                            logger=logger,
+                            node="writer_continue",
+                            chapter_index=chapter_index,
+                            extra={"writer_version": writer_version},
+                        )
                 else:
-                    resp2 = llm.invoke([system2, human2])
+                    resp2 = invoke_with_retry(
+                        llm,
+                        [system2, human2],
+                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                    )
                 add = (getattr(resp2, "content", "") or "").strip()
                 fr2, usage2 = extract_finish_reason_and_usage(resp2)
                 if logger:
@@ -350,9 +408,23 @@ def writer_agent(state: StoryState) -> StoryState:
                     base_url=str(getattr(llm, "base_url", "") or ""),
                     extra={"writer_version": writer_version},
                 ):
-                    resp3 = llm.invoke([system3, human3])
+                    resp3 = invoke_with_retry(
+                        llm,
+                        [system3, human3],
+                        max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                        base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                        logger=logger,
+                        node="writer_shorten",
+                        chapter_index=chapter_index,
+                        extra={"writer_version": writer_version},
+                    )
             else:
-                resp3 = llm.invoke([system3, human3])
+                resp3 = invoke_with_retry(
+                    llm,
+                    [system3, human3],
+                    max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                    base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                )
             shrunk = (getattr(resp3, "content", "") or "").strip()
             fr3, usage3 = extract_finish_reason_and_usage(resp3)
             if shrunk:

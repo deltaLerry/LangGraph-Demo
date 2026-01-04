@@ -3,7 +3,7 @@
 
 # 类型方向
 规则怪谈
-单个副本围绕一个核心场景展开，规则和谜题集中。可结合《十日终焉》的规则智斗与《道诡异仙》的氛围营造，但将规模控制在一个副本内。
+单个副本围绕一个核心场景展开，规则和谜题集中。可结合《十日终焉》的规则智斗与《道诡异仙》的氛围营造（并不限于这个，你不能抄袭，要原创，当然可以借鉴），但将规模控制在一个副本内。
 多个副本需要有串联的线 明线暗线等技巧。副本转场可以参考《蛊真人》等经典转场。
 
 # 核心看点与爽点
@@ -15,5 +15,5 @@
 每个章节的情节需要完整。每个章节都需要有标题。
 
 ``` bash
-python src/main.py --idea-file "test-idea.md" --chapters 50 --max-rewrites 1 --target-words 3000 --apply-canon-suggestions --archive --yes
+python src/main.py --idea-file "test-idea.md" --chapters 50 --max-rewrites 1 --target-words 3000 --apply-canon-suggestions --archive --yes  --apply-materials-suggestions
 ```
