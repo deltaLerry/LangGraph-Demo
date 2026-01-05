@@ -8,6 +8,7 @@ from state import StoryState
 from debug_log import truncate_text
 from storage import build_recent_memory_synopsis, load_canon_bundle, load_recent_chapter_memories, normalize_canon_bundle
 from storage import build_recent_arc_synopsis, load_recent_arc_summaries
+from storage import build_canon_text_for_context, infer_arc_start_from_materials_bundle, infer_current_arc_start
 from llm_meta import extract_finish_reason_and_usage
 from json_utils import extract_first_json_object
 from materials import materials_prompt_digest
@@ -73,31 +74,46 @@ def editor_agent(state: StoryState) -> StoryState:
         # === 2.1：注入 Canon + 最近记忆（控制长度） ===
         chapter_index = int(state.get("chapter_index", 1))
         project_dir = str(state.get("project_dir", "") or "")
-        canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
-        canon = normalize_canon_bundle(canon0)
         k = int(state.get("memory_recent_k", 3) or 3)
         include_unapproved = bool(state.get("include_unapproved_memories", False))
+        arc_every_n = int(state.get("arc_every_n", 10) or 10)
+        arc_k = int(state.get("arc_recent_k", 2) or 2)
+        arc_start = None
+        try:
+            mb = state.get("materials_bundle")
+            if isinstance(mb, dict) and mb:
+                arc_start = infer_arc_start_from_materials_bundle(mb, chapter_index=chapter_index)
+        except Exception:
+            arc_start = None
+        if not arc_start:
+            arc_start = infer_current_arc_start(project_dir, chapter_index=chapter_index, arc_every_n=arc_every_n) if project_dir else 1
         recent_memories = (
-            load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k, include_unapproved=include_unapproved)
+            load_recent_chapter_memories(
+                project_dir,
+                before_chapter=chapter_index,
+                k=k,
+                include_unapproved=include_unapproved,
+                min_chapter=arc_start,
+            )
             if project_dir
             else []
         )
         arc_text = ""
         if bool(state.get("enable_arc_summary", True)) and project_dir:
-            arc_k = int(state.get("arc_recent_k", 2) or 2)
             arcs = load_recent_arc_summaries(project_dir, before_chapter=chapter_index, k=arc_k)
             arc_text = truncate_text(build_recent_arc_synopsis(arcs), max_chars=1400)
-        canon_text = truncate_text(
-            json.dumps(
-                {
-                    "world": canon.get("world", {}) or {},
-                    "characters": canon.get("characters", {}) or {},
-                    "timeline": canon.get("timeline", {}) or {},
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            max_chars=6000,
+        canon_text = (
+            build_canon_text_for_context(
+                project_dir,
+                chapter_index=chapter_index,
+                arc_every_n=arc_every_n,
+                arc_recent_k=arc_k,
+                include_unapproved=include_unapproved,
+                materials_bundle=(state.get("materials_bundle") if isinstance(state.get("materials_bundle"), dict) else None),
+                max_chars=6000,
+            )
+            if project_dir
+            else "（无）"
         )
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
@@ -181,7 +197,8 @@ def editor_agent(state: StoryState) -> StoryState:
                 f"章节：第{chapter_index}章\n"
                 + (
                     f"目标字数：{int(state.get('target_words', 800) or 800)}"
-                    f"（约束区间：{int(int(state.get('target_words', 800) or 800)*0.85)}~{int(int(state.get('target_words', 800) or 800)*1.15)}）\n"
+                    f"（约束区间：{int(int(state.get('target_words', 800) or 800)*float(state.get('writer_min_ratio', 0.75) or 0.75))}~"
+                    f"{int(int(state.get('target_words', 800) or 800)*float(state.get('writer_max_ratio', 1.25) or 1.25))}）\n"
                 )
                 + f"策划任务（参考）：{planner_result}\n\n"
                 "【Canon 设定（真值来源）】\n"

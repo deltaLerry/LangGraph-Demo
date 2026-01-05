@@ -22,7 +22,6 @@ def _is_placeholder_tone(tone: Dict[str, Any]) -> bool:
     # style_constraints/avoid 都为空时视为占位
     return (not isinstance(sc, list) or len(sc) == 0) and (not isinstance(av, list) or len(av) == 0)
 
-
 def _merge_keep_existing(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
     """
     保守合并：existing 有值则保留，否则用 new（只做一层 dict）。

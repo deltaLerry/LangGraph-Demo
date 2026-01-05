@@ -29,9 +29,11 @@ def screenwriter_agent(state: StoryState) -> StoryState:
     target_words = int(state.get("target_words", 800) or 800)
     # 支持“分块生成细纲”：通过 state 指定本次只生成一个章节范围（outline_start..outline_end）
     outline_start = int(state.get("outline_start", 1) or 1)
-    outline_end = int(state.get("outline_end", chapters_total) or chapters_total)
     outline_start = max(1, outline_start)
-    outline_end = max(outline_start, min(int(chapters_total), outline_end))
+    outline_end_opt = state.get("outline_end", None)
+    # 默认分块大小：LLM 模式下避免一次要求生成 200 章细纲导致截断/空返回
+    chunk_size = int(state.get("outline_chunk_size", 10) or 10)
+    chunk_size = max(1, min(50, chunk_size))
     planner_result = state.get("planner_result") or {}
     project_name = str((planner_result or {}).get("项目名称", "") or "")
 
@@ -72,6 +74,8 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                             {
                                 "chapter_index": it.get("chapter_index"),
                                 "title": it.get("title", ""),
+                                "arc_id": it.get("arc_id", ""),
+                                "arc_title": it.get("arc_title", ""),
                                 "ending_hook": it.get("ending_hook", ""),
                             }
                         )
@@ -92,6 +96,15 @@ def screenwriter_agent(state: StoryState) -> StoryState:
             if state.get("force_llm", False):
                 raise RuntimeError("已指定 LLM 模式，但无法导入 langchain_core.messages") from e
             llm = None
+
+    # 计算本次需要生成的章节范围：
+    # - 若用户显式传入 outline_end：尊重
+    # - 否则：LLM 模式用 chunk；模板模式可一次生成全量（便于本地调试/离线产出）
+    if outline_end_opt is None:
+        outline_end = min(int(chapters_total), int(outline_start) + int(chunk_size) - 1) if llm else int(chapters_total)
+    else:
+        outline_end = int(outline_end_opt or chapters_total)
+    outline_end = max(outline_start, min(int(chapters_total), outline_end))
     if llm:
         required_range = f"{outline_start}..{outline_end}"
         system = SystemMessage(
@@ -106,6 +119,8 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 "    {\n"
                 '      "chapter_index": number,\n'
                 '      "title": "string",\n'
+                '      "arc_id": "string",\n'
+                '      "arc_title": "string",\n'
                 '      "goal": "string",\n'
                 '      "conflict": "string",\n'
                 '      "beats": ["string"],\n'
@@ -116,6 +131,10 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 "要求：\n"
                 f"- chapters 必须包含 {required_range} 这段范围内的每一章（chapter_index 连续）。\n"
                 f"- 全书总章数为 {chapters_total}（用于把控节奏与铺垫），但本次只生成 {required_range} 的细纲。\n"
+                "- **卷/副本（Arc）结构必须输出**：每章必须填写 arc_id 与 arc_title。\n"
+                "- arc_id 推荐格式：arc_001/arc_002/...（字符串即可）；同一卷的章节 arc_id 必须相同。\n"
+                "- arc_title：该卷/副本的短标题（例如“午夜公寓”“回声医院”）。\n"
+                "- 卷节奏：优先遵守用户规则“每个副本10~20章”；若当前范围仅覆盖卷的一部分，也必须保持 arc_id 连续一致。\n"
                 "- 每章 beats 3~6 条，强调可写作的行动/冲突/信息揭露，不要百科式设定说明。\n"
                 f"- 本次项目规模：总章数={chapters_total}；每章目标字数≈{target_words}（中文字符数近似）。请据此统一节奏：长篇要留足伏笔与层层升级，不要在前几章把底牌全掀完。\n"
                 "- 必须遵守 Canon（若 Canon 不完整，用模糊表达，不要强行新增硬设定名词）。\n"
@@ -129,6 +148,11 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                 f"章节数：{chapters_total}\n"
                 f"每章目标字数：{target_words}\n"
                 + (f"\n策划任务书（主线脉络）：\n{instr}\n" if instr else "")
+                + (
+                    ("\n【段落/结构规则（含卷节奏；尽量执行）】\n" + str(state.get("paragraph_rules", "") or "").strip() + "\n")
+                    if str(state.get("paragraph_rules", "") or "").strip()
+                    else ""
+                )
                 + (("\n【已有细纲提示（保持连续性；可参考）】\n" + outline_hint + "\n") if outline_hint else "")
                 + "\n【Canon（真值来源）】\n"
                 + f"{canon_text}\n"
@@ -142,6 +166,8 @@ def screenwriter_agent(state: StoryState) -> StoryState:
             "    {\n"
             '      "chapter_index": number,\n'
             '      "title": "string",\n'
+            '      "arc_id": "string",\n'
+            '      "arc_title": "string",\n'
             '      "goal": "string",\n'
             '      "conflict": "string",\n'
             '      "beats": ["string"],\n'
@@ -229,6 +255,8 @@ def screenwriter_agent(state: StoryState) -> StoryState:
                     by_idx[i] = {
                         "chapter_index": i,
                         "title": f"（占位）第{i}章",
+                        "arc_id": "",
+                        "arc_title": "",
                         "goal": "（占位）推进主线并对齐材料包节奏。",
                         "conflict": "（占位）制造冲突与选择。",
                         "beats": ["（占位）推进事件", "（占位）制造冲突", "（占位）留钩子"],
@@ -251,6 +279,8 @@ def screenwriter_agent(state: StoryState) -> StoryState:
             {
                 "chapter_index": i,
                 "title": f"（模板）第{i}章",
+                "arc_id": "arc_001",
+                "arc_title": "（模板）第一卷/第一副本",
                 "goal": "推进主线并制造选择与代价。",
                 "conflict": "外部阻力与内部动摇交织。",
                 "beats": ["推进事件", "制造冲突", "留钩子"],

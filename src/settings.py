@@ -38,6 +38,16 @@ class AppSettings:
     llm_max_attempts: int = 3
     llm_retry_base_sleep_s: float = 1.0
 
+    # writer 字数阈值（用于自动续写/缩稿的触发区间；放宽可减少“扩容/缩容”频繁触发）
+    # - writer_min_ratio: 低于 target_words * ratio 才触发 writer_continue（除非 finish_reason=length）
+    # - writer_max_ratio: 高于 target_words * ratio 才触发 writer_shorten
+    writer_min_ratio: float = 0.7
+    writer_max_ratio: float = 1.5
+
+    # materials_pack（材料总编裁剪层）迭代参数：在进入章节 writer/editor 循环前先把材料包“打磨到可用且无冲突”
+    materials_pack_max_rounds: int = 2
+    materials_pack_min_decisions: int = 1
+
     # Arc summaries（中程记忆）
     enable_arc_summary: bool = True
     arc_every_n: int = 10
@@ -89,6 +99,10 @@ def load_settings(
     editor_retry_on_invalid: Optional[int] = None,
     llm_max_attempts: Optional[int] = None,
     llm_retry_base_sleep_s: Optional[float] = None,
+    writer_min_ratio: Optional[float] = None,
+    writer_max_ratio: Optional[float] = None,
+    materials_pack_max_rounds: Optional[int] = None,
+    materials_pack_min_decisions: Optional[int] = None,
     enable_arc_summary: Optional[bool] = None,
     arc_every_n: Optional[int] = None,
     arc_recent_k: Optional[int] = None,
@@ -159,6 +173,16 @@ def load_settings(
     cfg_arc_every_n = int(cfg_app.get("arc_every_n", AppSettings.arc_every_n))
     cfg_arc_recent_k = int(cfg_app.get("arc_recent_k", AppSettings.arc_recent_k))
     cfg_auto_apply_updates = str(cfg_app.get("auto_apply_updates", AppSettings.auto_apply_updates) or "").strip().lower()
+    try:
+        cfg_writer_min_ratio = float(cfg_app.get("writer_min_ratio", AppSettings.writer_min_ratio))
+    except ValueError:
+        cfg_writer_min_ratio = AppSettings.writer_min_ratio
+    try:
+        cfg_writer_max_ratio = float(cfg_app.get("writer_max_ratio", AppSettings.writer_max_ratio))
+    except ValueError:
+        cfg_writer_max_ratio = AppSettings.writer_max_ratio
+    cfg_materials_pack_max_rounds = int(cfg_app.get("materials_pack_max_rounds", AppSettings.materials_pack_max_rounds))
+    cfg_materials_pack_min_decisions = int(cfg_app.get("materials_pack_min_decisions", AppSettings.materials_pack_min_decisions))
     default_planner_tasks: List[Dict[str, str]] = [
         {"task_name": "世界观设定", "executor": "架构师", "hint": "构建世界背景、规则、势力与核心冲突"},
         {"task_name": "核心角色", "executor": "角色导演", "hint": "产出主要人物卡：性格、动机、能力、禁忌、关系网"},
@@ -199,6 +223,10 @@ def load_settings(
     env_editor_retry_on_invalid = (os.getenv("EDITOR_RETRY_ON_INVALID", "") or "").strip()
     env_llm_max_attempts = (os.getenv("LLM_MAX_ATTEMPTS", "") or "").strip()
     env_llm_retry_base_sleep_s = (os.getenv("LLM_RETRY_BASE_SLEEP_S", "") or "").strip()
+    env_writer_min_ratio = (os.getenv("WRITER_MIN_RATIO", "") or "").strip()
+    env_writer_max_ratio = (os.getenv("WRITER_MAX_RATIO", "") or "").strip()
+    env_materials_pack_max_rounds = (os.getenv("MATERIALS_PACK_MAX_ROUNDS", "") or "").strip()
+    env_materials_pack_min_decisions = (os.getenv("MATERIALS_PACK_MIN_DECISIONS", "") or "").strip()
     env_enable_arc_summary = (os.getenv("ENABLE_ARC_SUMMARY", "") or "").strip().lower()
     env_arc_every_n = (os.getenv("ARC_EVERY_N", "") or "").strip()
     env_arc_recent_k = (os.getenv("ARC_RECENT_K", "") or "").strip()
@@ -229,6 +257,10 @@ def load_settings(
     final_editor_retry_on_invalid = cfg_editor_retry_on_invalid
     final_llm_max_attempts = cfg_llm_max_attempts
     final_llm_retry_base_sleep_s = cfg_llm_retry_base_sleep_s
+    final_writer_min_ratio = cfg_writer_min_ratio
+    final_writer_max_ratio = cfg_writer_max_ratio
+    final_materials_pack_max_rounds = cfg_materials_pack_max_rounds
+    final_materials_pack_min_decisions = cfg_materials_pack_min_decisions
     final_enable_arc_summary = cfg_enable_arc_summary
     final_arc_every_n = cfg_arc_every_n
     final_arc_recent_k = cfg_arc_recent_k
@@ -271,6 +303,27 @@ def load_settings(
             final_llm_retry_base_sleep_s = float(env_llm_retry_base_sleep_s)
         except ValueError:
             final_llm_retry_base_sleep_s = cfg_llm_retry_base_sleep_s
+
+    if env_writer_min_ratio:
+        try:
+            final_writer_min_ratio = float(env_writer_min_ratio)
+        except ValueError:
+            final_writer_min_ratio = cfg_writer_min_ratio
+    if env_writer_max_ratio:
+        try:
+            final_writer_max_ratio = float(env_writer_max_ratio)
+        except ValueError:
+            final_writer_max_ratio = cfg_writer_max_ratio
+    if env_materials_pack_max_rounds:
+        try:
+            final_materials_pack_max_rounds = int(env_materials_pack_max_rounds)
+        except ValueError:
+            final_materials_pack_max_rounds = cfg_materials_pack_max_rounds
+    if env_materials_pack_min_decisions:
+        try:
+            final_materials_pack_min_decisions = int(env_materials_pack_min_decisions)
+        except ValueError:
+            final_materials_pack_min_decisions = cfg_materials_pack_min_decisions
 
     if env_enable_arc_summary in ("1", "true", "yes", "on"):
         final_enable_arc_summary = True
@@ -340,6 +393,14 @@ def load_settings(
         final_llm_max_attempts = int(llm_max_attempts)
     if llm_retry_base_sleep_s is not None:
         final_llm_retry_base_sleep_s = float(llm_retry_base_sleep_s)
+    if writer_min_ratio is not None:
+        final_writer_min_ratio = float(writer_min_ratio)
+    if writer_max_ratio is not None:
+        final_writer_max_ratio = float(writer_max_ratio)
+    if materials_pack_max_rounds is not None:
+        final_materials_pack_max_rounds = int(materials_pack_max_rounds)
+    if materials_pack_min_decisions is not None:
+        final_materials_pack_min_decisions = int(materials_pack_min_decisions)
     if enable_arc_summary is not None:
         final_enable_arc_summary = bool(enable_arc_summary)
     if arc_every_n is not None:
@@ -364,6 +425,10 @@ def load_settings(
     final_editor_retry_on_invalid = max(0, min(3, int(final_editor_retry_on_invalid)))
     final_llm_max_attempts = max(1, min(6, int(final_llm_max_attempts)))
     final_llm_retry_base_sleep_s = max(0.2, min(10.0, float(final_llm_retry_base_sleep_s)))
+    final_writer_min_ratio = max(0.3, min(0.95, float(final_writer_min_ratio)))
+    final_writer_max_ratio = max(1.05, min(2.0, float(final_writer_max_ratio)))
+    final_materials_pack_max_rounds = max(0, min(6, int(final_materials_pack_max_rounds)))
+    final_materials_pack_min_decisions = max(0, min(20, int(final_materials_pack_min_decisions)))
     final_arc_every_n = max(0, min(50, int(final_arc_every_n)))
     final_arc_recent_k = max(0, min(10, int(final_arc_recent_k)))
     if final_auto_apply_updates not in ("off", "safe"):
@@ -412,6 +477,10 @@ def load_settings(
         editor_retry_on_invalid=final_editor_retry_on_invalid,
         llm_max_attempts=final_llm_max_attempts,
         llm_retry_base_sleep_s=final_llm_retry_base_sleep_s,
+        writer_min_ratio=final_writer_min_ratio,
+        writer_max_ratio=final_writer_max_ratio,
+        materials_pack_max_rounds=final_materials_pack_max_rounds,
+        materials_pack_min_decisions=final_materials_pack_min_decisions,
         enable_arc_summary=final_enable_arc_summary,
         arc_every_n=final_arc_every_n,
         arc_recent_k=final_arc_recent_k,

@@ -7,6 +7,9 @@ from debug_log import truncate_text
 from storage import (
     build_recent_arc_synopsis,
     build_recent_memory_synopsis,
+    build_canon_text_for_context,
+    infer_arc_start_from_materials_bundle,
+    infer_current_arc_start,
     load_canon_bundle,
     load_recent_arc_summaries,
     load_recent_chapter_memories,
@@ -68,31 +71,47 @@ def writer_agent(state: StoryState) -> StoryState:
 
         # === 2.1：注入 Canon + 最近记忆（控制长度） ===
         project_dir = str(state.get("project_dir", "") or "")
-        canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
-        canon = normalize_canon_bundle(canon0)
         k = int(state.get("memory_recent_k", 3) or 3)
         include_unapproved = bool(state.get("include_unapproved_memories", False))
+        arc_every_n = int(state.get("arc_every_n", 10) or 10)
+        arc_k = int(state.get("arc_recent_k", 2) or 2)
+        # 优先用“细纲的卷/副本结构（arc_id）”推断本卷范围；失败再回退到 arc summary / 分桶
+        arc_start = None
+        try:
+            mb = state.get("materials_bundle")
+            if isinstance(mb, dict) and mb:
+                arc_start = infer_arc_start_from_materials_bundle(mb, chapter_index=chapter_index)
+        except Exception:
+            arc_start = None
+        if not arc_start:
+            arc_start = infer_current_arc_start(project_dir, chapter_index=chapter_index, arc_every_n=arc_every_n) if project_dir else 1
         recent_memories = (
-            load_recent_chapter_memories(project_dir, before_chapter=chapter_index, k=k, include_unapproved=include_unapproved)
+            load_recent_chapter_memories(
+                project_dir,
+                before_chapter=chapter_index,
+                k=k,
+                include_unapproved=include_unapproved,
+                min_chapter=arc_start,  # 仅注入“本卷/本副本内”的近期记忆，旧卷走 arc_summary
+            )
             if project_dir
             else []
         )
         arc_text = ""
         if bool(state.get("enable_arc_summary", True)) and project_dir:
-            arc_k = int(state.get("arc_recent_k", 2) or 2)
             arcs = load_recent_arc_summaries(project_dir, before_chapter=chapter_index, k=arc_k)
             arc_text = truncate_text(build_recent_arc_synopsis(arcs), max_chars=1400)
-        canon_text = truncate_text(
-            json.dumps(
-                {
-                    "world": canon.get("world", {}) or {},
-                    "characters": canon.get("characters", {}) or {},
-                    "timeline": canon.get("timeline", {}) or {},
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            max_chars=6000,
+        canon_text = (
+            build_canon_text_for_context(
+                project_dir,
+                chapter_index=chapter_index,
+                arc_every_n=arc_every_n,
+                arc_recent_k=arc_k,
+                include_unapproved=include_unapproved,
+                materials_bundle=(state.get("materials_bundle") if isinstance(state.get("materials_bundle"), dict) else None),
+                max_chars=6000,
+            )
+            if project_dir
+            else "（无）"
         )
         memories_text = truncate_text(build_recent_memory_synopsis(recent_memories), max_chars=1200)
 
@@ -103,6 +122,9 @@ def writer_agent(state: StoryState) -> StoryState:
             materials_text = materials_prompt_digest(materials_bundle, chapter_index=chapter_index)
 
         # === 2.1.1：会议同步摘要（把“主编验收清单/硬约束”同步给写手，提升一次过） ===
+        canon0 = load_canon_bundle(project_dir) if project_dir else {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+        canon = normalize_canon_bundle(canon0)
+
         def _canon_names() -> str:
             try:
                 names: list[str] = []
@@ -198,7 +220,7 @@ def writer_agent(state: StoryState) -> StoryState:
                 content=(
                     "你是专业网文写手。你会严格按照主编的具体修改意见对稿件进行重写。\n"
                     "要求：逻辑自洽、避免AI腔、句式多样、节奏紧凑。\n"
-                    f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
+                    f"字数硬性要求：总长度控制在 {int(target_words*float(state.get('writer_min_ratio', 0.75) or 0.75))}~{int(target_words*float(state.get('writer_max_ratio', 1.25) or 1.25))} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
                     "命名纪律（长跑一致性关键）：除非 Canon/材料包/已知专有名词清单里已有，否则不要新增门派/功法/地名/组织/物品等专有名词；必须引入新概念时，用模糊描述，不要起新名字。\n"
@@ -239,7 +261,7 @@ def writer_agent(state: StoryState) -> StoryState:
                 content=(
                     "你是专业网文写手，擅长把一个点子写成逻辑通顺、画面感强的短篇开篇。\n"
                     "要求：中文；自然流畅；有冲突与钩子；避免AI感。\n"
-                    f"字数硬性要求：总长度控制在 {int(target_words*0.85)}~{int(target_words*1.15)} 字（中文字符数近似，包含标点与空白）。\n"
+                    f"字数硬性要求：总长度控制在 {int(target_words*float(state.get('writer_min_ratio', 0.75) or 0.75))}~{int(target_words*float(state.get('writer_max_ratio', 1.25) or 1.25))} 字（中文字符数近似，包含标点与空白）。\n"
                     "强约束：不得违背 Canon 设定（世界观/人物卡/时间线/文风）。如发现设定缺失，用模糊表达，不要自创硬设定。\n"
                     "阶段3强约束：若提供了【材料包】，必须遵循其中的“本章细纲/人物卡/基调”。材料包不得与 Canon 冲突；如冲突以 Canon 为准。\n"
                     "命名纪律（长跑一致性关键）：除非 Canon/材料包/已知专有名词清单里已有，否则不要新增门派/功法/地名/组织/物品等专有名词；必须引入新概念时，用模糊描述，不要起新名字。\n"
@@ -313,8 +335,10 @@ def writer_agent(state: StoryState) -> StoryState:
         # === 字数硬约束 & 被截断自动补全 ===
         # 说明：这里的“字数”按中文字符数近似（含标点/空白），用于工程约束，不追求严格统计口径。
         target = int(state.get("target_words", 800))
-        min_chars = int(target * 0.85)
-        max_chars = int(target * 1.15)
+        min_ratio = float(state.get("writer_min_ratio", 0.75) or 0.75)
+        max_ratio = float(state.get("writer_max_ratio", 1.25) or 1.25)
+        min_chars = int(target * min_ratio)
+        max_chars = int(target * max_ratio)
 
         def _need_continue(fr: str | None, s: str) -> bool:
             if fr and fr.lower() == "length":

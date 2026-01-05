@@ -290,7 +290,12 @@ def normalize_canon_bundle(canon: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_recent_chapter_memories(
-    project_dir: str, *, before_chapter: int, k: int = 3, include_unapproved: bool = False
+    project_dir: str,
+    *,
+    before_chapter: int,
+    k: int = 3,
+    include_unapproved: bool = False,
+    min_chapter: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     读取最近 k 章的 chapter memory（从 projects/<project>/memory/chapters 下取）。
@@ -303,9 +308,15 @@ def load_recent_chapter_memories(
     if not os.path.exists(mem_dir):
         return []
 
-    # 从 before_chapter-1 倒序找
+    # 从 before_chapter-1 倒序找（可选：限制只读某个范围内的记忆，例如“本卷/本副本内”）
     out: List[Dict[str, Any]] = []
-    for idx in range(before_chapter - 1, 0, -1):
+    lo = 1
+    try:
+        if min_chapter is not None:
+            lo = max(1, int(min_chapter))
+    except Exception:
+        lo = 1
+    for idx in range(before_chapter - 1, lo - 1, -1):
         if len(out) >= max(0, int(k)):
             break
         name = f"{idx:03d}.memory.json"
@@ -319,6 +330,219 @@ def load_recent_chapter_memories(
             continue
         out.append(obj)
     return out
+
+
+def infer_current_arc_start(project_dir: str, *, chapter_index: int, arc_every_n: int = 10) -> int:
+    """
+    推断“当前 Arc（卷/副本）”的起始章：
+    - 优先：用已落盘的 arc summary 边界（end_chapter < chapter_index 的最近一个）
+    - 兜底：按 arc_every_n 做分桶（例如每 10 章一个 Arc）
+    """
+    idx = max(1, int(chapter_index or 1))
+    # 1) 有 arc summaries：用最近一个 end_chapter + 1
+    try:
+        arcs = load_recent_arc_summaries(project_dir, before_chapter=idx, k=1)
+        if arcs and isinstance(arcs[0], dict):
+            end = int(arcs[0].get("end_chapter", 0) or 0)
+            if end > 0 and end < idx:
+                return end + 1
+    except Exception:
+        pass
+    # 2) 兜底：按固定步长分桶（这不是“硬限制角色/条目数”，只是用于定义“本卷范围”）
+    n = max(1, int(arc_every_n or 10))
+    return ((idx - 1) // n) * n + 1
+
+
+def _names_from_chapter_memory(m: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    if not isinstance(m, dict):
+        return names
+    # character_updates: [{name,...}]
+    cu = m.get("character_updates")
+    if isinstance(cu, list):
+        for it in cu:
+            if isinstance(it, dict):
+                n = str(it.get("name", "") or "").strip()
+                if n:
+                    names.append(n)
+    # events: [{who:[...]}]
+    ev = m.get("events")
+    if isinstance(ev, list):
+        for it in ev:
+            if isinstance(it, dict):
+                who = it.get("who")
+                if isinstance(who, list):
+                    for w in who:
+                        wn = str(w or "").strip()
+                        if wn:
+                            names.append(wn)
+    # 去重保持顺序
+    seen = set()
+    out: List[str] = []
+    for n in names:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def build_active_character_set(
+    project_dir: str,
+    *,
+    chapter_index: int,
+    arc_every_n: int = 10,
+    arc_recent_k: int = 2,
+    include_unapproved: bool = False,
+    materials_bundle: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """
+    动态“活跃角色集合”：
+    - 以当前 Arc（卷/副本）内的 chapter memory 为主（短线角色自然只在本卷内出现）
+    - 叠加最近 K 个 Arc summary 的 character_states（保证中长线人物不断线）
+    结果用于过滤注入 prompt 的人物卡，避免把已完结剧情的短线角色长期塞进上下文。
+    """
+    idx = max(1, int(chapter_index or 1))
+    arc_start = None
+    if isinstance(materials_bundle, dict) and materials_bundle:
+        arc_start = infer_arc_start_from_materials_bundle(materials_bundle, chapter_index=idx)
+    if not arc_start:
+        arc_start = infer_current_arc_start(project_dir, chapter_index=idx, arc_every_n=arc_every_n)
+    names: List[str] = []
+
+    # 1) 当前 Arc 内：从 arc_start 到 idx-1 的记忆（不必多，先读取窗口：最多 30 章）
+    #    注：这是“动态按剧情结构遗忘”，不是硬限制输出条目数。
+    start = arc_start
+    end = idx - 1
+    window = max(1, end - 30 + 1)
+    start = max(start, window)
+    for c in range(start, end + 1):
+        p = os.path.join(project_dir, "memory", "chapters", f"{c:03d}.memory.json")
+        obj = read_json(p)
+        if not (isinstance(obj, dict) and obj):
+            continue
+        approved = obj.get("approved", True)
+        if (approved is False) and (not include_unapproved):
+            continue
+        names.extend(_names_from_chapter_memory(obj))
+
+    # 2) 最近 Arc 摘要：character_states keys
+    try:
+        arcs = load_recent_arc_summaries(project_dir, before_chapter=idx, k=max(0, int(arc_recent_k)))
+        for a in arcs:
+            if not isinstance(a, dict):
+                continue
+            cs = a.get("character_states")
+            if isinstance(cs, dict):
+                for k in cs.keys():
+                    kn = str(k or "").strip()
+                    if kn:
+                        names.append(kn)
+    except Exception:
+        pass
+
+    # 去重保持顺序
+    seen = set()
+    out: List[str] = []
+    for n in names:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def build_canon_text_for_context(
+    project_dir: str,
+    *,
+    chapter_index: int,
+    arc_every_n: int = 10,
+    arc_recent_k: int = 2,
+    include_unapproved: bool = False,
+    materials_bundle: Optional[Dict[str, Any]] = None,
+    max_chars: int = 6000,
+) -> str:
+    """
+    构造“给 LLM 注入的 Canon 文本”，会按当前 Arc 的活跃角色动态过滤 characters：
+    - 主角/核心人物会自然保留（通常在最近记忆/arc summary 中持续出现）
+    - 已完结剧情的短线角色会淡出，不再长期占上下文
+    """
+    canon0 = load_canon_bundle(project_dir)
+    canon = normalize_canon_bundle(canon0)
+    active = set(
+        build_active_character_set(
+            project_dir,
+            chapter_index=chapter_index,
+            arc_every_n=arc_every_n,
+            arc_recent_k=arc_recent_k,
+            include_unapproved=include_unapproved,
+            materials_bundle=materials_bundle,
+        )
+    )
+    chars = canon.get("characters") if isinstance(canon.get("characters"), dict) else {}
+    arr = chars.get("characters") if isinstance(chars.get("characters"), list) else []
+    if arr and active:
+        # 额外保底：保留前 1 个（通常是主角），避免“开篇还没沉淀到记忆”时被过滤掉
+        keep: List[Dict[str, Any]] = []
+        for i, it in enumerate(arr):
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name", "") or "").strip()
+            if (i == 0) or (name and name in active):
+                keep.append(it)
+        canon["characters"] = {"characters": keep}
+    return truncate_text(
+        json.dumps(
+            {
+                "world": canon.get("world", {}) or {},
+                "characters": canon.get("characters", {}) or {},
+                "timeline": canon.get("timeline", {}) or {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        max_chars=int(max_chars),
+    )
+
+
+def infer_arc_start_from_materials_bundle(materials_bundle: Dict[str, Any], *, chapter_index: int) -> Optional[int]:
+    """
+    从 materials_bundle.outline 的 arc_id 推断当前 Arc 起点（更贴合“卷-章结构”）。
+    返回 None 表示无法推断（例如无 arc_id / 无 outline）。
+    """
+    try:
+        mb = materials_bundle if isinstance(materials_bundle, dict) else {}
+        outline = mb.get("outline") if isinstance(mb.get("outline"), dict) else {}
+        chs = outline.get("chapters") if isinstance(outline.get("chapters"), list) else []
+        idx = int(chapter_index or 1)
+        # 找到当前章
+        cur = None
+        for it in chs:
+            if isinstance(it, dict) and int(it.get("chapter_index", 0) or 0) == idx:
+                cur = it
+                break
+        if not (isinstance(cur, dict) and cur):
+            return None
+        arc_id = str(cur.get("arc_id", "") or "").strip()
+        if not arc_id:
+            return None
+        # 向前找相同 arc_id 的最小 chapter_index
+        start = idx
+        for it in chs:
+            if not isinstance(it, dict):
+                continue
+            try:
+                ci = int(it.get("chapter_index", 0) or 0)
+            except Exception:
+                continue
+            if ci <= 0:
+                continue
+            if str(it.get("arc_id", "") or "").strip() == arc_id:
+                if ci < start:
+                    start = ci
+        return max(1, int(start))
+    except Exception:
+        return None
 
 
 def build_recent_memory_synopsis(memories: List[Dict[str, Any]]) -> str:

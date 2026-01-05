@@ -6,9 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from debug_log import truncate_text
-from llm_call import invoke_with_retry
-from llm_meta import extract_finish_reason_and_usage
-from json_utils import extract_first_json_object
+from llm_json import invoke_json_with_repair
 from storage import read_json, write_json, load_canon_bundle, normalize_canon_bundle
 
 
@@ -118,46 +116,27 @@ def generate_arc_summary(
         )
     )
 
-    if logger:
-        with logger.llm_call(
-            node="arc_summary",
-            chapter_index=end_chapter,
-            messages=[system, human],
-            model=getattr(llm, "model_name", None) or getattr(llm, "model", None),
-            base_url=str(getattr(llm, "base_url", "") or ""),
-            extra={"start_chapter": start_chapter, "end_chapter": end_chapter},
-        ):
-            resp = invoke_with_retry(
-                llm,
-                [system, human],
-                max_attempts=llm_max_attempts,
-                base_sleep_s=llm_retry_base_sleep_s,
-                logger=logger,
-                node="arc_summary",
-                chapter_index=end_chapter,
-                extra={"start_chapter": start_chapter, "end_chapter": end_chapter},
-            )
-    else:
-        resp = invoke_with_retry(
-            llm,
-            [system, human],
-            max_attempts=llm_max_attempts,
-            base_sleep_s=llm_retry_base_sleep_s,
-        )
+    schema_text = (
+        "{\n"
+        '  "start_chapter": number,\n'
+        '  "end_chapter": number,\n'
+        '  "summary": "string",\n'
+        '  "key_facts": ["string"],\n'
+        '  "character_states": {"角色名":"状态/动机/关系变化"},\n'
+        '  "open_threads": ["string"]\n'
+        "}\n"
+    )
 
-    text = (getattr(resp, "content", "") or "").strip()
-    if logger:
-        fr, usage = extract_finish_reason_and_usage(resp)
-        logger.event(
-            "llm_response",
-            node="arc_summary",
-            chapter_index=end_chapter,
-            content=truncate_text(text, max_chars=getattr(logger, "max_chars", 20000)),
-            finish_reason=fr,
-            token_usage=usage,
-        )
-
-    obj = extract_first_json_object(text) or {}
+    obj, _raw, _fr, _usage = invoke_json_with_repair(
+        llm=llm,
+        messages=[system, human],
+        schema_text=schema_text,
+        node="arc_summary",
+        chapter_index=end_chapter,
+        logger=logger,
+        max_attempts=int(llm_max_attempts),
+        base_sleep_s=float(llm_retry_base_sleep_s),
+    )
     if not isinstance(obj, dict) or not obj:
         return {}
     obj["start_chapter"] = start_chapter

@@ -34,6 +34,7 @@ from agents.character_director import character_director_agent
 from agents.screenwriter import screenwriter_agent
 from agents.tone import tone_agent
 from agents.materials_aggregator import materials_aggregator_agent
+from agents.materials_pack_loop import materials_pack_loop_agent
 from agents.materials_init import materials_init_agent
 from settings import load_settings
 from workflow import build_chapter_app
@@ -395,6 +396,8 @@ def main():
         "arc_recent_k": int(settings.arc_recent_k),
         "auto_apply_updates": str(settings.auto_apply_updates or "off"),
         "planner_tasks": settings.planner_tasks or [],
+        "materials_pack_max_rounds": int(getattr(settings, "materials_pack_max_rounds", 2)),
+        "materials_pack_min_decisions": int(getattr(settings, "materials_pack_min_decisions", 1)),
     }
 
     planned_state: StoryState
@@ -455,6 +458,7 @@ def main():
     planned_state = screenwriter_agent(planned_state)
     planned_state = tone_agent(planned_state)
     planned_state = materials_aggregator_agent(planned_state)
+    planned_state = materials_pack_loop_agent(planned_state)
     # 将长期 materials 合并进 materials_bundle（不覆盖本次专家更具体的产出，只填空）
     try:
         mb = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
@@ -523,6 +527,8 @@ def main():
             "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
             "llm_max_attempts": int(settings.llm_max_attempts),
             "llm_retry_base_sleep_s": float(settings.llm_retry_base_sleep_s),
+            "writer_min_ratio": float(getattr(settings, "writer_min_ratio", 0.75)),
+            "writer_max_ratio": float(getattr(settings, "writer_max_ratio", 1.25)),
             "enable_arc_summary": bool(settings.enable_arc_summary),
             "arc_every_n": int(settings.arc_every_n),
             "arc_recent_k": int(settings.arc_recent_k),
@@ -630,6 +636,8 @@ def main():
             "editor_retry_on_invalid": int(settings.editor_retry_on_invalid),
             "llm_max_attempts": int(settings.llm_max_attempts),
             "llm_retry_base_sleep_s": float(settings.llm_retry_base_sleep_s),
+            "writer_min_ratio": float(getattr(settings, "writer_min_ratio", 0.75)),
+            "writer_max_ratio": float(getattr(settings, "writer_max_ratio", 1.25)),
             "enable_arc_summary": bool(settings.enable_arc_summary),
             "arc_every_n": int(settings.arc_every_n),
             "arc_recent_k": int(settings.arc_recent_k),
@@ -798,36 +806,78 @@ def main():
             except Exception:
                 pass
 
-        # === Arc summaries：每 N 章生成一次“中程摘要”，用于 150 章规模控制 prompt 膨胀与长程一致性 ===
+        # === Arc summaries：优先在“Arc 结束”时生成（更贴合卷/副本节奏）；否则每 N 章兜底 ===
         try:
             enable_arc = bool(settings.enable_arc_summary)
             every_n = int(settings.arc_every_n)
-            if enable_arc and llm and every_n > 0 and (idx % every_n == 0):
-                start_arc = max(1, idx - every_n + 1)
-                arc_name = f"arc_{start_arc:03d}-{idx:03d}.json"
-                arc_path = os.path.join(project_dir, "memory", "arcs", arc_name)
-                if not os.path.exists(arc_path):
-                    arc = generate_arc_summary(
-                        llm=llm,
-                        project_dir=project_dir,
-                        start_chapter=start_arc,
-                        end_chapter=idx,
-                        logger=logger,
-                        llm_max_attempts=int(settings.llm_max_attempts),
-                        llm_retry_base_sleep_s=float(settings.llm_retry_base_sleep_s),
-                    )
-                    if isinstance(arc, dict) and arc:
-                        p = write_arc_summary(project_dir, start_arc, idx, arc)
-                        try:
-                            logger.event(
-                                "arc_summary_written",
-                                chapter_index=idx,
-                                start_chapter=start_arc,
-                                end_chapter=idx,
-                                path=os.path.relpath(p, output_base).replace("\\", "/"),
-                            )
-                        except Exception:
-                            pass
+            if enable_arc and llm:
+                # 1) 优先：基于 materials_bundle.outline 的 arc_id 检测“当前章是否为本Arc最后一章”
+                should_write = False
+                start_arc = None
+                try:
+                    mbx = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+                    outx = mbx.get("outline") if isinstance(mbx.get("outline"), dict) else {}
+                    chs = outx.get("chapters") if isinstance(outx.get("chapters"), list) else []
+                    cur = None
+                    nxt = None
+                    for it in chs:
+                        if isinstance(it, dict) and int(it.get("chapter_index", 0) or 0) == int(idx):
+                            cur = it
+                        if isinstance(it, dict) and int(it.get("chapter_index", 0) or 0) == int(idx) + 1:
+                            nxt = it
+                    cur_arc = str((cur or {}).get("arc_id", "") or "").strip()
+                    nxt_arc = str((nxt or {}).get("arc_id", "") or "").strip()
+                    # 若下一章存在且 arc_id 不同：说明 idx 是 arc 结束点
+                    if cur_arc and nxt is not None and nxt_arc and (cur_arc != nxt_arc):
+                        should_write = True
+                        # 找到该 arc_id 的最小 chapter_index 作为 start_arc
+                        s0 = int(idx)
+                        for it in chs:
+                            if not isinstance(it, dict):
+                                continue
+                            if str(it.get("arc_id", "") or "").strip() != cur_arc:
+                                continue
+                            try:
+                                ci = int(it.get("chapter_index", 0) or 0)
+                            except Exception:
+                                continue
+                            if 0 < ci < s0:
+                                s0 = ci
+                        start_arc = s0
+                except Exception:
+                    should_write = False
+                    start_arc = None
+
+                # 2) 兜底：每 N 章写一次（即使没有 arc_id）
+                if (not should_write) and every_n > 0 and (idx % every_n == 0):
+                    should_write = True
+                    start_arc = max(1, idx - every_n + 1)
+
+                if should_write and start_arc:
+                    arc_name = f"arc_{int(start_arc):03d}-{int(idx):03d}.json"
+                    arc_path = os.path.join(project_dir, "memory", "arcs", arc_name)
+                    if not os.path.exists(arc_path):
+                        arc = generate_arc_summary(
+                            llm=llm,
+                            project_dir=project_dir,
+                            start_chapter=int(start_arc),
+                            end_chapter=int(idx),
+                            logger=logger,
+                            llm_max_attempts=int(settings.llm_max_attempts),
+                            llm_retry_base_sleep_s=float(settings.llm_retry_base_sleep_s),
+                        )
+                        if isinstance(arc, dict) and arc:
+                            p = write_arc_summary(project_dir, int(start_arc), int(idx), arc)
+                            try:
+                                logger.event(
+                                    "arc_summary_written",
+                                    chapter_index=idx,
+                                    start_chapter=int(start_arc),
+                                    end_chapter=idx,
+                                    path=os.path.relpath(p, output_base).replace("\\", "/"),
+                                )
+                            except Exception:
+                                pass
         except Exception as e:
             # Arc 摘要失败不应阻断批量生成
             try:

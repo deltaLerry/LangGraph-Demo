@@ -39,6 +39,14 @@ class StoryState(TypedDict, total=False):
     llm_max_attempts: int
     llm_retry_base_sleep_s: float
 
+    # writer 字数阈值（触发自动续写/缩稿）
+    writer_min_ratio: float
+    writer_max_ratio: float
+
+    # materials_pack 总编打磨
+    materials_pack_max_rounds: int
+    materials_pack_min_decisions: int
+
     # Arc summaries（中程记忆）
     enable_arc_summary: bool
     arc_every_n: int

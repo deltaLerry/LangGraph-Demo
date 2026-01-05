@@ -31,6 +31,18 @@ editor_retry_on_invalid = 1
 llm_max_attempts = 3
 llm_retry_base_sleep_s = 10.0
 
+# writer 字数阈值（减少 writer_continue / writer_shorten 的频繁触发）
+# - 低于 target_words * writer_min_ratio 才会“扩容续写”（除非 finish_reason=length）
+# - 高于 target_words * writer_max_ratio 才会“缩容压稿”
+writer_min_ratio = 0.7
+writer_max_ratio = 1.5
+
+# 材料包总编打磨（在进入章节 writer/editor 循环前，先对 materials_pack 做“材料写手→材料主编”迭代）
+# - 0 表示关闭（直接用一次聚合的结果）
+materials_pack_max_rounds = 2
+# - 至少需要多少条 decisions（收敛口径）；太少容易导致写作/审稿不一致
+materials_pack_min_decisions = 1
+
 # Arc summaries（中程记忆）：每 N 章生成一个“分卷摘要”，写作/审稿时注入最近 K 个，用于 150 章规模控制矛盾与 token
 enable_arc_summary = true
 arc_every_n = 10
