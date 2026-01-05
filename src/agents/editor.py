@@ -133,6 +133,10 @@ def editor_agent(state: StoryState) -> StoryState:
         if is_last_review:
             # 最后一次：宁可通过；若必须拒稿也只需聚焦硬伤
             desired_min_issues = max(0, min(desired_min_issues, 2))
+        # 统一口径：prompt / validate / fallback 必须一致
+        # - desired_min_issues 可以被放宽到 0（最后一轮更易通过）
+        # - 但若决定“审核不通过”，至少要给 1 条 issue（否则“拒稿却无问题”自相矛盾）
+        min_reject_issues = max(1, int(desired_min_issues or 0))
 
         user_style = truncate_text(str(state.get("style_override", "") or "").strip(), max_chars=1200)
         paragraph_rules = truncate_text(str(state.get("paragraph_rules", "") or "").strip(), max_chars=800)
@@ -162,7 +166,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 f"- 本次审稿轮次：writer_version={writer_version} / max_rewrites={max_rewrites}。\n"
                 + ("- 这是倒数第二次审稿：请尽可能多给出 issues（建议 6~12 条），把所有会导致下次返工的风险一次性指出。\n" if is_penultimate_review else "")
                 + ("- 这是最后一次审稿：请适当放宽标准以提高通过率。只有命中“硬伤”才拒稿；若仅是轻微措辞/润色/可接受的小瑕疵，请直接判定为 审核通过。\n" if is_last_review else "")
-                + f"- decision=审核不通过 时，issues 至少 {max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)} 条（每条必须可执行且包含 quote）。\n"
+                + f"- decision=审核不通过 时，issues 至少 {min_reject_issues} 条（每条必须可执行且包含 quote）。\n"
                 "- 每条 issue 必须“具体可执行”：指出哪里错 + 为什么错 + 怎么改（改法要能直接照做）。\n"
                 "- 每条 issue 必须包含 quote：从正文原样复制一小段，能定位到问题。\n"
                 "- 若你找不到可引用 quote，就不要输出该条（宁可少而准）。\n"
@@ -245,8 +249,8 @@ def editor_agent(state: StoryState) -> StoryState:
             # 拒稿：issues 必须是 list 且数量达到期望阈值
             if not isinstance(iss, list):
                 return "issues_not_list"
-            need_n = max(0, int(desired_min_issues or 0))
-            if need_n > 0 and len([x for x in iss if isinstance(x, dict)]) < need_n:
+            need_n = int(min_reject_issues)
+            if len([x for x in iss if isinstance(x, dict)]) < need_n:
                 return f"issues_too_few(expected>={need_n})"
             # 最小字段校验（避免空 issue）
             for i, it in enumerate(iss):
@@ -303,7 +307,7 @@ def editor_agent(state: StoryState) -> StoryState:
         if decision not in ("审核通过", "审核不通过"):
             decision = "审核不通过"
             quote0 = truncate_text(str(writer_result or ""), max_chars=160)
-            need_n = max(2, int(desired_min_issues) if desired_min_issues > 0 else 2)
+            need_n = int(min_reject_issues)
             issues_list = [
                 {
                     "type": "readability",
