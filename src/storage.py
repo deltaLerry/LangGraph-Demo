@@ -7,6 +7,7 @@ import shutil
 from datetime import datetime
 from typing import Any, Dict, Optional, List, Tuple
 
+from debug_log import truncate_text
 
 def safe_filename(name: str, fallback: str = "project") -> str:
     name = (name or "").strip() or fallback

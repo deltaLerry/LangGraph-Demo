@@ -201,6 +201,171 @@ def materials_pack_loop_agent(state: StoryState) -> StoryState:
     last_review: Dict[str, Any] = {}
     rounds_used = 0
 
+    def _merge_pack(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将分段产出的 patch 合并回 materials_pack：
+        - 只做浅层 merge（materials_pack 顶层字段足够）
+        - list 字段（arc_plan/decisions/risks/等）由 patch 覆盖，以避免“越写越重复”
+        """
+        if not isinstance(base, dict):
+            base = {}
+        if not isinstance(patch, dict) or not patch:
+            return base
+        out = dict(base)
+        for k, v in patch.items():
+            if v is None:
+                continue
+            out[k] = v
+        return out
+
+    def _chunked_rewrite_pack(
+        *,
+        llm: Any,
+        base_pack: Dict[str, Any],
+        issues_obj: Any,
+        suggested_obj: Any,
+        world: Dict[str, Any],
+        characters: Dict[str, Any],
+        outline: Dict[str, Any],
+        tone: Dict[str, Any],
+        arcs_hint: Any,
+        node_prefix: str,
+    ) -> Dict[str, Any]:
+        """
+        把 materials_pack 的“重写”拆成多段：减少单次 completion 体积，避免 length 截断。
+        不降低质量：每段都给同一套上游材料+主编意见，只是输出字段更聚焦。
+        """
+        # 分段开关/段数（可从 state 覆盖）
+        max_parts = int(state.get("materials_pack_writer_max_parts", 5) or 5)
+        max_parts = max(1, min(8, max_parts))
+
+        # --- schemas（每段只产一部分字段）---
+        schema_core = (
+            "{\n"
+            '  "logline": "string",\n'
+            '  "creative_brief": "string",\n'
+            '  "pacing_plan": "string"\n'
+            "}\n"
+        )
+        schema_arc = (
+            "{\n"
+            '  "arc_plan": [{"arc_id":"string","arc_title":"string","start_chapter":number,"end_chapter":number,"purpose":"string","stakes_escalation":"string","ending_hook":"string"}]\n'
+            "}\n"
+        )
+        schema_world_growth = (
+            "{\n"
+            '  "world_building": "string",\n'
+            '  "growth_system": "string"\n'
+            "}\n"
+        )
+        schema_style = (
+            "{\n"
+            '  "style_guide": {"voice":"string","do":["string"],"dont":["string"]}\n'
+            "}\n"
+        )
+        schema_exec = (
+            "{\n"
+            '  "conflicts_found": [{"topic":"string","evidence":"string","impact":"string"}],\n'
+            '  "decisions": [{"topic":"string","decision":"string","rationale":"string","instructions":["string"]}],\n'
+            '  "checklists": {"global":["string"],"per_arc":["string"],"per_chapter":["string"]},\n'
+            '  "risks": [{"risk":"string","symptom":"string","mitigation":"string"}]\n'
+            "}\n"
+        )
+
+        def _validate_non_empty(field: str) -> Any:
+            def _v(obj: Dict[str, Any]) -> str:
+                if not isinstance(obj, dict):
+                    return "not_dict"
+                if not str(obj.get(field, "") or "").strip():
+                    return f"missing_{field}"
+                return ""
+
+            return _v
+
+        def _validate_arc(obj: Dict[str, Any]) -> str:
+            if not isinstance(obj, dict):
+                return "not_dict"
+            ap = obj.get("arc_plan")
+            if ap is None:
+                return ""
+            if not isinstance(ap, list):
+                return "arc_plan_not_list"
+            return ""
+
+        def _validate_exec(obj: Dict[str, Any]) -> str:
+            if not isinstance(obj, dict):
+                return "not_dict"
+            ds = obj.get("decisions")
+            if ds is not None and (not isinstance(ds, list)):
+                return "decisions_not_list"
+            # 不强制 >=min_decisions：允许某一段失败时先保留旧 pack 的 decisions
+            return ""
+
+        try:
+            from langchain_core.messages import SystemMessage, HumanMessage
+        except Exception:
+            return base_pack
+
+        sys_base = SystemMessage(
+            content=(
+                "你是小说项目的“材料写手”。你将根据材料主编的 issues 与 suggested_decisions，分段改写 materials_pack。\n"
+                "你必须且仅输出严格 JSON。\n"
+                "硬约束：不得与 world/characters/outline/tone 冲突；不确定处写“待补充”，不要胡编专有名词。\n"
+                "注意：本次是分段输出，每次只输出 schema 指定的字段；不要输出其它字段。\n"
+            )
+        )
+
+        common_ctx = (
+            f"材料主编 issues：\n{truncate_text(json.dumps(issues_obj or [], ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
+            f"材料主编 suggested_decisions：\n{truncate_text(json.dumps(suggested_obj or [], ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
+            f"Arc结构（从细纲推断，务必对齐）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
+            "上游专家材料（事实/约束来源）：\n"
+            f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
+            f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
+            f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
+            f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
+            "当前 materials_pack（供你参考；在其基础上改好）：\n"
+            f"{truncate_text(json.dumps(base_pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
+        )
+
+        out_pack = dict(base_pack)
+
+        parts: list[tuple[str, str, Any, Any]] = [
+            ("core", schema_core, _validate_non_empty("logline"), "请只输出 logline/creative_brief/pacing_plan，保持提纲挈领且可执行。"),
+            ("arc", schema_arc, _validate_arc, "请只输出 arc_plan（可为空数组），用于长篇节奏与卷末钩子统一。"),
+            ("world_growth", schema_world_growth, _validate_non_empty("world_building"), "请只输出 world_building/growth_system：提炼规则与成长体系口径，避免百科堆砌。"),
+            ("style", schema_style, None, "请只输出 style_guide：voice/do/dont 要可执行、可检查，避免泛泛而谈。"),
+            ("exec", schema_exec, _validate_exec, "请只输出 conflicts_found/decisions/checklists/risks：收敛口径要清晰、指令要可落地。"),
+        ]
+        parts = parts[:max_parts]
+
+        for tag, schema_text, validate_fn, instruction in parts:
+            human = HumanMessage(
+                content=(
+                    f"{instruction}\n\n"
+                    f"{common_ctx}\n\n"
+                    "本段 schema：\n"
+                    f"{schema_text}\n"
+                )
+            )
+            obj, _raw, _fr, _usage = invoke_json_with_repair(
+                llm=llm,
+                messages=[sys_base, human],
+                schema_text=schema_text,
+                node=f"{node_prefix}_{tag}",
+                chapter_index=0,
+                logger=logger,
+                max_attempts=int(state.get("llm_max_attempts", 3) or 3),
+                base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                validate=validate_fn,
+                max_fix_chars=12000,
+            )
+            if isinstance(obj, dict) and obj:
+                out_pack = _merge_pack(out_pack, obj)
+
+        # 最终标准化（补默认字段/清洗类型）
+        return ensure_materials_pack(out_pack)
+
     for r in range(max_rounds):
         rounds_used = r + 1
         # (A) 材料主编：找冲突/缺口，给裁决建议
@@ -247,42 +412,34 @@ def materials_pack_loop_agent(state: StoryState) -> StoryState:
             break
 
         # (B) 材料写手：按 issues + suggested_decisions 重写 pack
-        sys_w = SystemMessage(
-            content=(
-                "你是小说项目的“材料写手”。你将根据材料主编的 issues 与 suggested_decisions，重写 materials_pack。\n"
-                "目标：收敛口径、去冲突、补缺口；同时保持提纲挈领，不要写到逐章细节。\n"
-                "你必须且仅输出严格 JSON，且严格遵循 schema。\n"
-                "硬约束：不得与 world/characters/outline/tone 冲突；不确定处写“待补充”，不要胡编专有名词。\n"
-            )
-        )
-        human_w = HumanMessage(
-            content=(
-                f"材料主编 issues：\n{truncate_text(json.dumps(last_review.get('issues', []), ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
-                f"材料主编 suggested_decisions：\n{truncate_text(json.dumps(last_review.get('suggested_decisions', []), ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
-                f"Arc结构（从细纲推断，务必对齐）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
-                "上游专家材料（事实/约束来源）：\n"
-                f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
-                f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
-                f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
-                f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
-                "当前 materials_pack（请在其基础上改好）：\n"
-                f"{truncate_text(json.dumps(pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
-            )
-        )
-        new_pack, _raw2, _fr2, _usage2 = invoke_json_with_repair(
+        issues_obj = last_review.get("issues", [])
+        suggested_obj = last_review.get("suggested_decisions", [])
+        pack2 = _chunked_rewrite_pack(
             llm=llm,
-            messages=[sys_w, human_w],
-            schema_text=pack_schema,
-            node="materials_pack_writer",
-            chapter_index=0,
-            logger=logger,
-            max_attempts=int(state.get("llm_max_attempts", 3) or 3),
-            base_sleep_s=float(state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
-            validate=_validate_pack,
-            max_fix_chars=12000,
+            base_pack=pack,
+            issues_obj=issues_obj,
+            suggested_obj=suggested_obj,
+            world=world,
+            characters=characters,
+            outline=outline,
+            tone=tone,
+            arcs_hint=arcs_hint,
+            node_prefix="materials_pack_writer",
         )
-        if isinstance(new_pack, dict) and new_pack:
-            pack = ensure_materials_pack(new_pack)
+        if isinstance(pack2, dict) and pack2:
+            # 最终再做一次强校验：logline + decisions 数量
+            pack2 = ensure_materials_pack(pack2)
+            if _validate_pack(pack2) == "":
+                pack = pack2
+            else:
+                # 分段重写没达标：保留旧 pack（避免质量下降）
+                if logger:
+                    logger.event(
+                        "materials_pack_writer_incomplete",
+                        node="materials_pack_writer",
+                        chapter_index=0,
+                        reason=_validate_pack(pack2),
+                    )
 
     mb2 = dict(mb)
     mb2["materials_pack"] = ensure_materials_pack(pack)

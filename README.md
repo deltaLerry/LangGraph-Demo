@@ -189,7 +189,7 @@ python main.py \
   --llm-mode llm \
   --idea-file "test-idea.md" \
   --project "规则之上：无限" \
-  --target-words 3500 \
+  --target-words 2500 \
   --chapters 200 \
   --max-rewrites 1 \
   --editor-min-issues 2 \
