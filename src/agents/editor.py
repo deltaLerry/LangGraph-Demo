@@ -407,4 +407,3 @@ def editor_agent(state: StoryState) -> StoryState:
         )
 
     return state
-
