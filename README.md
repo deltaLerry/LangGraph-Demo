@@ -345,9 +345,9 @@ python src\main.py --llm-mode template
   - **过短/被截断**：自动续写补全（最多 2 段）
   - **过长**：不自动压缩（避免二次改写导致风格漂移），仅在日志中记录告警
 
-## debug 日志太长？（preview 截断 + 全量落盘）
+## debug 日志太长？（LLM 正文 preview 截断 + 全量落盘）
 
-为了便于快速扫日志，`debug.jsonl` / `restate_debug.jsonl` 会对超长字段做“预览截断”：
+为了便于快速扫日志，`debug.jsonl` / `restate_debug.jsonl` 会对 **LLM request/response 的正文类超长字段** 做“预览截断”：
 - jsonl 内只保留 **前 N 字**，并显示 `...(剩余约xxx字符)`
 - 全量内容会写到同目录 `debug_payloads/*.txt`
 - jsonl 会附带 `<field>__full_path` / `<field>__chars` 指向全量文件

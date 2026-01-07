@@ -132,11 +132,29 @@ class RunLogger:
     def _compact_inplace(self, obj: Any, hint_prefix: str) -> Any:
         """
         递归压缩日志对象：
-        - 超长 string：写入 payload 文件，jsonl 只保留 preview，并附带 __full_path/__chars
+        - 仅对 LLM 相关事件的“正文类字段”做截断（messages/content/response/raw/traceback 等）：
+          - 超长 string：写入 payload 文件，jsonl 只保留 preview，并附带 __full_path/__chars
         - list/dict：递归处理；list 中的超长 string 会替换成带元信息的 dict（否则无处放 sibling keys）
         """
+        # 注意：这里的 hint_prefix 会被 event() 传入 event 名（例如 llm_request），
+        # 并在递归时拼接成类似 "llm_request.messages[0].content" 的路径。
+        # 我们用这个路径来决定“是否需要截断”，确保元数据（ts/model/token_usage 等）保持完整。
         pc = int(self.preview_chars or 0)
         pc = 100 if pc <= 0 else pc
+
+        def _should_compact_str(path: str) -> bool:
+            # 仅对 llm_* 事件做截断；其它事件字段保持完整（避免元数据被截断）
+            if not str(hint_prefix or "").startswith("llm_"):
+                return False
+            p = str(path or "")
+            # 只截断“正文类字段”，例如 request messages、response/raw、traceback 等
+            if ".messages" in p or p.endswith(".messages") or p.startswith("llm_request.messages"):
+                return True
+            if any(x in p for x in (".content", ".prompt", ".response", ".raw", ".text", ".traceback")):
+                return True
+            if p.endswith((".content", ".prompt", ".response", ".raw", ".text", ".traceback")):
+                return True
+            return False
 
         if isinstance(obj, dict):
             # 先处理当前层的键
@@ -144,7 +162,7 @@ class RunLogger:
                 v = obj.get(k)
                 key_hint = f"{hint_prefix}.{k}" if hint_prefix else str(k)
                 if isinstance(v, str):
-                    if len(v) > pc:
+                    if len(v) > pc and _should_compact_str(key_hint):
                         meta = self._write_payload(content=v, ext="txt", hint=key_hint)
                         obj[k] = _preview_text(v, pc)
                         obj[f"{k}__full_path"] = meta.get("full_path", "")
@@ -161,7 +179,7 @@ class RunLogger:
             for i, it in enumerate(obj):
                 item_hint = f"{hint_prefix}[{i}]"
                 if isinstance(it, str):
-                    if len(it) > pc:
+                    if len(it) > pc and _should_compact_str(item_hint):
                         meta = self._write_payload(content=it, ext="txt", hint=item_hint)
                         out.append(
                             {
