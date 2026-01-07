@@ -448,7 +448,9 @@ def main():
             "arc_every_n": int(meta.get("arc_every_n", settings.arc_every_n) or settings.arc_every_n),
             "arc_recent_k": int(meta.get("arc_recent_k", settings.arc_recent_k) or settings.arc_recent_k),
             # 重申模式也支持安全自动沉淀（写入 rewrites/projects/...，不影响原 projects）
-            "auto_apply_updates": str(meta.get("auto_apply_updates", settings.auto_apply_updates) or settings.auto_apply_updates or "off"),
+            # 注意：这里优先使用“本次运行的 settings/config/CLI”，不要继承旧 run_meta，
+            # 否则你在 config.toml 改了 auto_apply_updates 也不会在 restate 生效。
+            "auto_apply_updates": str(settings.auto_apply_updates or "off"),
             "planner_result": planner_result if isinstance(planner_result, dict) else {},
             "planner_json": json.dumps(planner_result, ensure_ascii=False, indent=2) if isinstance(planner_result, dict) else "",
             "planner_used_llm": bool(meta.get("planner_used_llm", False)),
@@ -500,6 +502,28 @@ def main():
             range_start=int(s),
             range_end=int(e),
         )
+
+        # 资产可见性诊断：一眼确认“arc/memory/materials 是否真的存在且可读”
+        try:
+            arcs_dir = os.path.join(project_dir, "memory", "arcs")
+            chmem_dir = os.path.join(project_dir, "memory", "chapters")
+            arcs_n = len([x for x in os.listdir(arcs_dir)]) if os.path.exists(arcs_dir) else 0
+            chmem_n = len([x for x in os.listdir(chmem_dir)]) if os.path.exists(chmem_dir) else 0
+            outline_ok = os.path.exists(os.path.join(project_dir, "materials", "outline.json"))
+            tone_ok = os.path.exists(os.path.join(project_dir, "materials", "tone.json"))
+            logger.event(
+                "restate_assets",
+                project_dir=project_dir,
+                arcs_dir=arcs_dir,
+                arcs_count=arcs_n,
+                chapter_memories_dir=chmem_dir,
+                chapter_memories_count=chmem_n,
+                outline_exists=bool(outline_ok),
+                tone_exists=bool(tone_ok),
+                auto_apply_updates=str(settings.auto_apply_updates or "off"),
+            )
+        except Exception:
+            pass
 
         planned_state: StoryState = dict(base_state)
 
@@ -626,6 +650,7 @@ def main():
                 chap_outline = pick_outline_for_chapter(mb0, int(chapter_index))
                 if chap_outline:
                     return
+
                 block = 20
                 start_i = int(chapter_index)
                 end_i = min(int(chapters_total), start_i + block - 1)
@@ -637,6 +662,7 @@ def main():
                 new_outline = tmp_state.get("screenwriter_result") if isinstance(tmp_state.get("screenwriter_result"), dict) else {}
                 if not isinstance(new_outline, dict) or not new_outline:
                     return
+
                 outline0 = mb0.get("outline") if isinstance(mb0.get("outline"), dict) else {}
                 chs0 = outline0.get("chapters") if isinstance(outline0.get("chapters"), list) else []
                 by_idx: dict[int, dict] = {}
@@ -652,6 +678,7 @@ def main():
                             by_idx[int(it.get("chapter_index", 0) or 0)] = it
                         except Exception:
                             pass
+
                 merged_chs = [by_idx[k] for k in sorted([k for k in by_idx.keys() if k > 0])]
                 outline0 = dict(outline0)
                 if not str(outline0.get("main_arc", "") or "").strip() and str(new_outline.get("main_arc", "") or "").strip():
@@ -659,6 +686,7 @@ def main():
                 if (not outline0.get("themes")) and new_outline.get("themes"):
                     outline0["themes"] = new_outline.get("themes", [])
                 outline0["chapters"] = merged_chs
+
                 mb0 = dict(mb0)
                 mb0["outline"] = outline0
                 planned_state["materials_bundle"] = mb0
@@ -986,11 +1014,11 @@ def main():
                     "restate_chapter_end",
                     chapter_index=int(idx),
                     mode="review",
-                    reviews_used=reviews_used,
+                reviews_used=reviews_used,
                     writer_version=int(st2.get("writer_version", 0) or 0),
                     editor_decision=str(st2.get("editor_decision", "") or ""),
                     writer_chars=len(str(st2.get("writer_result", "") or "")),
-                )
+            )
             except Exception as e:
                 import traceback as _tb
 
