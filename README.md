@@ -345,6 +345,20 @@ python src\main.py --llm-mode template
   - **过短/被截断**：自动续写补全（最多 2 段）
   - **过长**：不自动压缩（避免二次改写导致风格漂移），仅在日志中记录告警
 
+## debug 日志太长？（preview 截断 + 全量落盘）
+
+为了便于快速扫日志，`debug.jsonl` / `restate_debug.jsonl` 会对超长字段做“预览截断”：
+- jsonl 内只保留 **前 N 字**，并显示 `...(剩余约xxx字符)`
+- 全量内容会写到同目录 `debug_payloads/*.txt`
+- jsonl 会附带 `<field>__full_path` / `<field>__chars` 指向全量文件
+
+可在 `config.toml` 的 `[app]` 下配置（默认 100）：
+
+```toml
+[app]
+debug_preview_chars = 100
+```
+
 ## 两个“需要你确认”的介入点（推荐工作流）
 
 本项目默认偏“安全”：**不会未经确认就修改 Canon，也不会未经确认就归档**（除非你显式 `--yes`）。

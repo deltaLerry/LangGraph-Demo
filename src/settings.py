@@ -66,6 +66,8 @@ class AppSettings:
 
     # debug：写入运行日志/调用图
     debug: bool = False
+    # debug：日志内联预览长度（超出则写入 debug_payloads/*，jsonl 仅保留 preview + 指针）
+    debug_preview_chars: int = 100
 
     # 生成参数
     gen: GenerationSettings = GenerationSettings()
@@ -110,6 +112,7 @@ def load_settings(
     target_words: Optional[int] = None,
     chapters: Optional[int] = None,
     max_rewrites: Optional[int] = None,
+    debug_preview_chars: Optional[int] = None,
 ) -> AppSettings:
     """
     配置优先级：config.toml < 环境变量 < CLI覆盖
@@ -206,6 +209,7 @@ def load_settings(
             cfg_planner_tasks = cleaned
     cfg_llm_mode = str(cfg_app.get("llm_mode", "") or "").strip().lower() or AppSettings.llm_mode
     cfg_debug = bool(cfg_app.get("debug", AppSettings.debug))
+    cfg_debug_preview_chars = int(cfg_app.get("debug_preview_chars", AppSettings.debug_preview_chars))
 
     cfg_target_words = int(cfg_gen.get("target_words", GenerationSettings.target_words))
     cfg_chapters = int(cfg_gen.get("chapters", GenerationSettings.chapters))
@@ -234,6 +238,7 @@ def load_settings(
     env_planner_tasks = (os.getenv("PLANNER_TASKS_JSON", "") or "").strip()
     env_llm_mode = (os.getenv("LLM_MODE", "") or "").strip().lower()
     env_debug = (os.getenv("DEBUG", "") or os.getenv("APP_DEBUG", "") or "").strip().lower()
+    env_debug_preview_chars = (os.getenv("DEBUG_PREVIEW_CHARS", "") or os.getenv("APP_DEBUG_PREVIEW_CHARS", "") or "").strip()
     env_target_words = os.getenv("TARGET_WORDS", "").strip()
     env_chapters = os.getenv("CHAPTERS", "").strip()
     env_max_rewrites = os.getenv("MAX_REWRITES", "").strip()
@@ -266,6 +271,7 @@ def load_settings(
     final_arc_recent_k = cfg_arc_recent_k
     final_auto_apply_updates = cfg_auto_apply_updates or AppSettings.auto_apply_updates
     final_planner_tasks = cfg_planner_tasks
+    final_debug_preview_chars = cfg_debug_preview_chars
     if env_memory_recent_k:
         try:
             final_memory_recent_k = int(env_memory_recent_k)
@@ -366,6 +372,12 @@ def load_settings(
         final_debug = True
     if env_debug in ("0", "false", "no", "off"):
         final_debug = False
+
+    if env_debug_preview_chars:
+        try:
+            final_debug_preview_chars = int(env_debug_preview_chars)
+        except ValueError:
+            final_debug_preview_chars = cfg_debug_preview_chars
     final_target_words = _env_int(env_target_words, cfg_target_words)
     final_chapters = _env_int(env_chapters, cfg_chapters)
     final_max_rewrites = _env_int(env_max_rewrites, cfg_max_rewrites)
@@ -415,6 +427,8 @@ def load_settings(
         final_chapters = int(chapters)
     if max_rewrites is not None:
         final_max_rewrites = int(max_rewrites)
+    if debug_preview_chars is not None:
+        final_debug_preview_chars = int(debug_preview_chars)
 
     # 约束
     final_target_words = max(50, final_target_words)
@@ -431,6 +445,7 @@ def load_settings(
     final_materials_pack_min_decisions = max(0, min(20, int(final_materials_pack_min_decisions)))
     final_arc_every_n = max(0, min(50, int(final_arc_every_n)))
     final_arc_recent_k = max(0, min(10, int(final_arc_recent_k)))
+    final_debug_preview_chars = max(20, min(2000, int(final_debug_preview_chars)))
     if final_auto_apply_updates not in ("off", "safe"):
         final_auto_apply_updates = "off"
     if final_llm_mode not in ("template", "llm", "auto"):
@@ -488,6 +503,7 @@ def load_settings(
         planner_tasks=final_planner_tasks,
         llm_mode=final_llm_mode,
         debug=final_debug,
+        debug_preview_chars=final_debug_preview_chars,
         gen=GenerationSettings(
             target_words=final_target_words,
             chapters=final_chapters,

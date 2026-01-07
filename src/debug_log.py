@@ -4,7 +4,7 @@ import json
 import os
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +25,29 @@ def truncate_text(text: str, max_chars: int = 20000) -> str:
     return _truncate(text or "", max_chars=max_chars)
 
 
+def _preview_text(s: str, preview_chars: int) -> str:
+    s = s or ""
+    n = len(s)
+    if n <= preview_chars:
+        return s
+    remain = max(0, n - preview_chars)
+    return s[:preview_chars] + f"...(剩余约{remain}字符)"
+
+
+def _safe_filename(s: str, max_len: int = 120) -> str:
+    s = str(s or "").strip() or "payload"
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            out.append(ch)
+        else:
+            out.append("_")
+    x = "".join(out).strip("._")
+    if not x:
+        x = "payload"
+    return x[:max_len]
+
+
 def _safe_serialize_messages(messages: Any, max_chars: int) -> Any:
     """
     将 LangChain message 列表安全序列化成可写入日志的结构。
@@ -40,7 +63,8 @@ def _safe_serialize_messages(messages: Any, max_chars: int) -> Any:
         out.append(
             {
                 "role": role,
-                "content": _truncate(str(content) if content is not None else "", max_chars=max_chars),
+                # 不在这里截断：交给 RunLogger.event 的“preview + payload 落盘”统一处理，确保 payload 永远是全量
+                "content": str(content) if content is not None else "",
             }
         )
     return out
@@ -51,6 +75,10 @@ class RunLogger:
     path: str
     enabled: bool = True
     max_chars: int = 20000
+    # jsonl 内联预览长度（超出则写入 debug_payloads/* 并在 jsonl 中仅保留 preview + 指针）
+    preview_chars: int = 100
+    payload_dirname: str = "debug_payloads"
+    _seq: int = field(default=0, init=False, repr=False)
 
     def _write(self, obj: Dict[str, Any]) -> None:
         if not self.enabled:
@@ -59,8 +87,109 @@ class RunLogger:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+    def _payload_dir(self) -> str:
+        base = os.path.dirname(self.path)
+        return os.path.join(base, self.payload_dirname)
+
+    def _write_payload(self, *, content: Any, ext: str, hint: str) -> Dict[str, Any]:
+        """
+        写入全量 payload 文件，并返回可写入 jsonl 的元信息。
+        - ext: "txt" or "json"
+        """
+        try:
+            os.makedirs(self._payload_dir(), exist_ok=True)
+        except Exception:
+            # 若无法创建目录，直接降级为内联
+            return {"full_path": "", "chars": 0, "bytes": 0}
+
+        self._seq += 1
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S.%f")[:-3]  # 毫秒
+        fname = f"{ts}_{self._seq:04d}_{_safe_filename(hint)}.{ext}"
+        full_path = os.path.join(self._payload_dir(), fname)
+        try:
+            if ext == "txt":
+                text = str(content or "")
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                size_bytes = os.path.getsize(full_path) if os.path.exists(full_path) else 0
+                return {
+                    "full_path": os.path.relpath(full_path, os.path.dirname(self.path)).replace("\\", "/"),
+                    "chars": len(text),
+                    "bytes": int(size_bytes),
+                }
+            # json
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(content, ensure_ascii=False))
+            size_bytes = os.path.getsize(full_path) if os.path.exists(full_path) else 0
+            return {
+                "full_path": os.path.relpath(full_path, os.path.dirname(self.path)).replace("\\", "/"),
+                "chars": len(json.dumps(content, ensure_ascii=False)),
+                "bytes": int(size_bytes),
+            }
+        except Exception:
+            return {"full_path": "", "chars": 0, "bytes": 0}
+
+    def _compact_inplace(self, obj: Any, hint_prefix: str) -> Any:
+        """
+        递归压缩日志对象：
+        - 超长 string：写入 payload 文件，jsonl 只保留 preview，并附带 __full_path/__chars
+        - list/dict：递归处理；list 中的超长 string 会替换成带元信息的 dict（否则无处放 sibling keys）
+        """
+        pc = int(self.preview_chars or 0)
+        pc = 100 if pc <= 0 else pc
+
+        if isinstance(obj, dict):
+            # 先处理当前层的键
+            for k in list(obj.keys()):
+                v = obj.get(k)
+                key_hint = f"{hint_prefix}.{k}" if hint_prefix else str(k)
+                if isinstance(v, str):
+                    if len(v) > pc:
+                        meta = self._write_payload(content=v, ext="txt", hint=key_hint)
+                        obj[k] = _preview_text(v, pc)
+                        obj[f"{k}__full_path"] = meta.get("full_path", "")
+                        obj[f"{k}__chars"] = int(meta.get("chars", 0) or 0)
+                    continue
+                if isinstance(v, (dict, list)):
+                    obj[k] = self._compact_inplace(v, key_hint)
+                else:
+                    obj[k] = v
+            return obj
+
+        if isinstance(obj, list):
+            out = []
+            for i, it in enumerate(obj):
+                item_hint = f"{hint_prefix}[{i}]"
+                if isinstance(it, str):
+                    if len(it) > pc:
+                        meta = self._write_payload(content=it, ext="txt", hint=item_hint)
+                        out.append(
+                            {
+                                "__preview": _preview_text(it, pc),
+                                "__full_path": meta.get("full_path", ""),
+                                "__chars": int(meta.get("chars", 0) or 0),
+                            }
+                        )
+                    else:
+                        out.append(it)
+                    continue
+                if isinstance(it, (dict, list)):
+                    out.append(self._compact_inplace(it, item_hint))
+                else:
+                    out.append(it)
+            return out
+
+        # 其他类型不处理
+        return obj
+
     def event(self, event: str, **data: Any) -> None:
-        self._write({"ts": _now_iso(), "event": event, **data})
+        obj = {"ts": _now_iso(), "event": event, **data}
+        # 统一压缩：避免 llm request/response/traceback 等把 jsonl 冲爆
+        try:
+            obj = self._compact_inplace(obj, hint_prefix=str(event))
+        except Exception:
+            pass
+        self._write(obj)
 
     def span(self, name: str, **data: Any):
         return _Span(self, name=name, data=data)

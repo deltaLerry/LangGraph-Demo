@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime
 
 from llm import try_get_chat_llm
@@ -237,23 +238,9 @@ def main():
         max_rewrites=args.max_rewrites,
     )
     if args.llm_mode.strip():
-        settings = settings.__class__(
-            idea=settings.idea,
-            output_base=settings.output_base,
-            llm_mode=args.llm_mode.strip().lower(),
-            debug=settings.debug,
-            gen=settings.gen,
-            llm=settings.llm,
-        )
+        settings = replace(settings, llm_mode=args.llm_mode.strip().lower())
     if args.debug:
-        settings = settings.__class__(
-            idea=settings.idea,
-            output_base=settings.output_base,
-            llm_mode=settings.llm_mode,
-            debug=True,
-            gen=settings.gen,
-            llm=settings.llm,
-        )
+        settings = replace(settings, debug=True)
     # output_base 若为相对路径，则优先相对 config.toml 所在目录解析；若 config 不存在则相对 repo 根目录解析。
     output_base = settings.output_base
     if not os.path.isabs(output_base):
@@ -364,7 +351,11 @@ def main():
         force_llm = settings.llm_mode == "llm"
         try:
             # 重申日志单独落盘，避免污染原 debug.jsonl
-            logger = RunLogger(path=os.path.join(current_dir, "restate_debug.jsonl"), enabled=bool(settings.debug))
+            logger = RunLogger(
+                path=os.path.join(current_dir, "restate_debug.jsonl"),
+                enabled=bool(settings.debug),
+                preview_chars=int(getattr(settings, "debug_preview_chars", 100) or 100),
+            )
             with logger.span("llm_init", llm_mode=settings.llm_mode):
                 if settings.llm_mode == "template":
                     llm = None
@@ -998,7 +989,11 @@ def main():
     current_dir = make_current_dir(output_base)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    logger = RunLogger(path=os.path.join(current_dir, "debug.jsonl"), enabled=bool(settings.debug))
+    logger = RunLogger(
+        path=os.path.join(current_dir, "debug.jsonl"),
+        enabled=bool(settings.debug),
+        preview_chars=int(getattr(settings, "debug_preview_chars", 100) or 100),
+    )
     logger.event(
         "run_start",
         llm_mode=settings.llm_mode,

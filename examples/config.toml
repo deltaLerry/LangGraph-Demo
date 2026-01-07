@@ -52,6 +52,11 @@ llm_mode = "auto"
 # 是否开启 debug：输出 debug.jsonl 运行日志 + call_graph.md 节点调用图
 debug = true
 
+# debug 日志内联预览长度（默认100）。
+# - 超出该长度的长文本会完整写入 outputs/current/debug_payloads/*.txt
+# - debug.jsonl / restate_debug.jsonl 里仅保留 preview，并追加 <field>__full_path / <field>__chars 便于追溯
+debug_preview_chars = 100
+
 [generation]
 # 目标字数（每章）
 target_words = 5000
