@@ -40,6 +40,8 @@ def writer_agent(state: StoryState) -> StoryState:
 
     feedback = state.get("editor_feedback") or []
     is_rewrite = bool(state.get("needs_rewrite", False)) and writer_version > 1
+    # rewrite 时把“上一版原稿”一并提供给写手，避免只看 issues 导致剧情信息漂移
+    draft_text = str(state.get("writer_result", "") or "").strip()
 
     # 从 Planner 的“开篇基调”任务指令中粗略取出风格关键词（模板/LLM 都可用）
     opening_task = ""
@@ -164,6 +166,7 @@ def writer_agent(state: StoryState) -> StoryState:
 
         user_style = str(state.get("style_override", "") or "").strip()
         paragraph_rules = str(state.get("paragraph_rules", "") or "").strip()
+        rewrite_instructions = str(state.get("rewrite_instructions", "") or "").strip()
         sync_digest = (
             "【会议同步（写前对齐）｜主编验收清单】\n"
             "- 字数：严格控制在区间内；接近上限要主动收束并结尾。\n"
@@ -178,6 +181,8 @@ def writer_agent(state: StoryState) -> StoryState:
             sync_digest += "\n【用户风格覆盖（最高优先级；不允许与 Canon 冲突）】\n" + truncate_text(user_style, max_chars=1200) + "\n"
         if paragraph_rules:
             sync_digest += "\n【段落/结构约束（尽量遵守）】\n" + truncate_text(paragraph_rules, max_chars=800) + "\n"
+        if rewrite_instructions:
+            sync_digest += "\n【重写指导（最高优先级；不允许与 Canon 冲突）】\n" + truncate_text(rewrite_instructions, max_chars=1600) + "\n"
 
         # === 2.1.2：结构化审稿意见（优先使用 editor_report.issues） ===
         def _structured_editor_issues_digest() -> str:
@@ -248,6 +253,7 @@ def writer_agent(state: StoryState) -> StoryState:
                     + (("【分卷/Arc摘要（参考，优先于单章梗概；避免长程矛盾）】\n" + arc_text + "\n\n") if arc_text else "")
                     + "【最近章节记忆（参考，避免矛盾）】\n"
                     + f"{memories_text}\n\n"
+                    + (("【原稿正文（基于此重写；尽量保持剧情信息与推进，只修复问题并优化表达）】\n" + draft_text + "\n\n") if draft_text else "")
                     + (
                         ("【结构化审稿意见（逐条修复；优先）】\n" + structured_issues_text + "\n\n")
                         if structured_issues_text

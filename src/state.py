@@ -24,6 +24,8 @@ class StoryState(TypedDict, total=False):
     # 用户风格覆盖/段落规则（便于无需手改 style.md 就能控制文风与段落结构）
     style_override: str
     paragraph_rules: str
+    # 重写/重申时用户额外指导意见（只影响本次 rewrite/restate，不自动写入 Canon）
+    rewrite_instructions: str
 
     # idea-file 点子包原文与解析结果（用于追溯/调试）
     idea_source_text: str

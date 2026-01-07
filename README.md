@@ -191,8 +191,34 @@ python main.py \
   --project "规则之上：无限" \
   --target-words 2500 \
   --chapters 200 \
-  --max-rewrites 1 \
-  --editor-min-issues 2 \
+  --max-rewrites 5 \
+  --editor-min-issues 5 \
+  --editor-retry-on-invalid 1 \
+  --llm-max-attempts 3 \
+  --llm-retry-base-sleep-s 10.0 \
+  --memory-recent-k 3 \
+  --arc-every-n 10 \
+  --arc-recent-k 2 \
+  --auto-apply-updates safe \
+  --debug \
+  --archive \
+  --yes
+```
+
+重写模式：
+```bash
+python main.py \
+  --config "config.toml" \
+  --llm-mode llm \
+  --idea-file "test-idea.md" \
+  --rewrite-file "rewrite-idea.md" \
+  --project "规则之上：无限" \
+  --target-words 2500 \
+  --chapters 200 \
+  --restate \
+  --restate-max-reviews 3 \
+  --max-rewrites 3 \
+  --editor-min-issues 5 \
   --editor-retry-on-invalid 1 \
   --llm-max-attempts 3 \
   --llm-retry-base-sleep-s 10.0 \
@@ -248,6 +274,50 @@ Start-Process -NoNewWindow -FilePath python -ArgumentList @(
 ```
 - `--archive`：运行结束后自动归档（默认不归档，建议先 review）
 - `--archive-only`：只归档当前 `outputs/current`（review 通过后手动入库）
+- `--restate`：**重申模式（隔离工作区）**。会先复制到 repo 根目录下的 `rewrites/`：
+  - `outputs/current` → `rewrites/outputs/current`
+  - `outputs/projects/current` → `rewrites/projects/current`
+  
+  后续所有审稿/改写/落盘都只在 `rewrites/` 下进行，**不影响原 `current`**。
+- `--restate` 现在同时支持**补齐缺失章节 / 重生成失败章节**：
+  - 若 `rewrites/outputs/current/chapters/XXX.md` 存在且非空：走“复审→不通过才改写→复审”的重申逻辑
+  - 若 `XXX.md` 缺失/为空，或存在 `XXX.error.json` 且正文不存在：走“正常生成流程”自动补生成
+  - 单章失败会继续处理下一章，并写入 `XXX.error.json`（不会中断整批）
+- `--rewrite-file "path/to/rewrite.txt"`：重申/重写时的**用户额外指导意见**（UTF-8）。会注入 writer/editor，并落盘到 `rewrites/outputs/current/rewrite_instructions.txt` 便于追溯。
+- `--restate-max-reviews 3`：重申时**每章最多审稿次数**（必须 >=2；包含最终验收审稿）。流程为“先审稿，**通过就不重写**；不通过才重写→复审”，并且**最后一次审稿会适当放宽**避免流程自锁。
+- `--restate-start 1 --restate-end 10`：重申时只处理指定章节范围（可选）。
+- `--chapters 200`：在重申模式下也生效，用于明确“目标总章节数”（用于补齐缺失章节；优先级高于 `run_meta.json`）。
+
+### 重申（复审 + 改写）示例
+
+前置：你已经跑过一次生成流程，且 `outputs/current/chapters/` 下存在 `001.md`、`002.md`...；同时项目资产存在 `outputs/projects/current/`。
+
+```bash
+python src\main.py ^
+  --config "config.toml" ^
+  --llm-mode llm ^
+  --restate ^
+  --restate-max-reviews 4 ^
+  --debug
+```
+
+常见场景：原来计划 200 章，但目前只生成到 100 章，中间还有少量 `*.error.json` 失败章——希望一键补齐并自动重试失败章：
+
+```bash
+python src\main.py ^
+  --config "config.toml" ^
+  --llm-mode llm ^
+  --restate ^
+  --chapters 200 ^
+  --restate-max-reviews 4 ^
+  --debug
+```
+
+产物：
+- **最终稿覆盖**：`rewrites/outputs/current/chapters/001.md`（只改 rewrites，不影响 current）
+- **中间稿/报告**：`rewrites/outputs/current/restate/chapters/001.v0.md`（原稿）、`001.v2.md`（首次重写，若发生）… + 对应 `*.editor.json`
+- **日志**：`rewrites/outputs/current/restate_debug.jsonl`
+- **项目资产写入**（memory/canon/materials 的读写口径）：`rewrites/projects/current/`
 - `--project "<name>"`：指定项目名（用于续写/固定 `projects/<project>`）
 - `--resume`：续写模式（复用 `project_meta.json`，起始章自动为已有最大章+1）
 - `--start-chapter 101`：显式指定从第101章开始写（不依赖自动推断）

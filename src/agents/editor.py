@@ -65,6 +65,13 @@ def editor_agent(state: StoryState) -> StoryState:
         if logger:
             logger.event("node_start", node="editor", chapter_index=state.get("chapter_index", 1))
 
+        # 重申/复审模式：强制产出可执行 issues（用于驱动重写）
+        # - 设计目的：有些模型倾向“直接放过”，导致 issues 为空，重写只能靠泛泛要求
+        force_reject_with_issues = bool(state.get("editor_force_reject_with_issues", False))
+        # 重申/复审模式：更严格（但不会强制拒稿）；用于提高审稿标准
+        # 注意：为了避免流程自锁，建议由上层在“最后一次审稿”关闭该开关。
+        strict_mode = bool(state.get("editor_strict_mode", False))
+
         # === 审稿轮次策略：倒数第二次更严格给更多 issues；最后一次放宽提高通过率 ===
         writer_version = int(state.get("writer_version", 1) or 1)
         max_rewrites = int(state.get("max_rewrites", 1) or 1)
@@ -140,6 +147,7 @@ def editor_agent(state: StoryState) -> StoryState:
 
         user_style = truncate_text(str(state.get("style_override", "") or "").strip(), max_chars=1200)
         paragraph_rules = truncate_text(str(state.get("paragraph_rules", "") or "").strip(), max_chars=800)
+        rewrite_instructions = truncate_text(str(state.get("rewrite_instructions", "") or "").strip(), max_chars=1600)
         system = SystemMessage(
             content=(
                 "你是苛刻的编辑部主编，负责最终稿件质量拍板。\n"
@@ -150,7 +158,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 "1) Canon 设定（world/characters/timeline）：真值来源，任何冲突都算硬伤\n"
                 "2) 阶段3【材料包】（人物卡/本章细纲/基调/风格约束）：必须遵循；但不得覆盖 Canon\n"
                 "3) 最近章节记忆：用于连续性；若与 Canon 冲突，以 Canon 为准\n"
-                "4) 用户风格覆盖/段落规则：若不与 Canon 冲突，优先执行\n"
+                "4) 重写指导/用户风格覆盖/段落规则：若不与 Canon 冲突，优先执行\n"
                 "5) planner 任务：仅参考\n"
                 "\n"
                 "判定标准（更严格、更有效）：只要命中任一条“硬伤”，必须判定为 审核不通过：\n"
@@ -164,6 +172,16 @@ def editor_agent(state: StoryState) -> StoryState:
                 "\n"
                 "输出质量要求（避免无效审核）：\n"
                 f"- 本次审稿轮次：writer_version={writer_version} / max_rewrites={max_rewrites}。\n"
+                + (
+                    f"- 【复审强制模式】你必须判定为 审核不通过，并给出不少于 {int(min_reject_issues)} 条 issues（每条必须含 quote/issue/fix/action）。\n"
+                    if force_reject_with_issues
+                    else ""
+                )
+                + (
+                    "- 【严格模式】请提高审稿标准：只要存在明显可改进项（细纲对齐不足、钩子弱、节奏拖沓、画面/心理不足、AI腔/重复句式、信息倾倒、命名漂移风险），倾向判定为 审核不通过 并给出可执行 issues。\n"
+                    if (strict_mode and (not is_last_review) and (not force_reject_with_issues))
+                    else ""
+                )
                 + ("- 这是倒数第二次审稿：请尽可能多给出 issues（建议 6~12 条），把所有会导致下次返工的风险一次性指出。\n" if is_penultimate_review else "")
                 + ("- 这是最后一次审稿：请适当放宽标准以提高通过率。只有命中“硬伤”才拒稿；若仅是轻微措辞/润色/可接受的小瑕疵，请直接判定为 审核通过。\n" if is_last_review else "")
                 + f"- decision=审核不通过 时，issues 至少 {min_reject_issues} 条（每条必须可执行且包含 quote）。\n"
@@ -207,6 +225,7 @@ def editor_agent(state: StoryState) -> StoryState:
                 + f"策划任务（参考）：{planner_result}\n\n"
                 "【Canon 设定（真值来源）】\n"
                 f"{canon_text}\n\n"
+                + (("【重写指导（不与 Canon 冲突时最高优先级）】\n" + rewrite_instructions + "\n\n") if rewrite_instructions else "")
                 + (("【用户风格覆盖（不与 Canon 冲突时优先执行）】\n" + user_style + "\n\n") if user_style else "")
                 + (("【段落/结构约束（不与 Canon 冲突时优先执行）】\n" + paragraph_rules + "\n\n") if paragraph_rules else "")
                 + (
@@ -243,6 +262,9 @@ def editor_agent(state: StoryState) -> StoryState:
             if dec not in ("审核通过", "审核不通过"):
                 return "invalid_decision"
             iss = rep.get("issues")
+            # 复审强制模式：不允许“审核通过”（必须输出拒稿+足量 issues）
+            if force_reject_with_issues and dec == "审核通过":
+                return "pass_not_allowed_in_force_reject_mode"
             if dec == "审核通过":
                 # 通过时允许 issues 为空（便于提高最后一轮通过率）
                 return ""

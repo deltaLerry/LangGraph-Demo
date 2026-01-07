@@ -15,6 +15,7 @@ __pycache__/
 
 # output
 outputs/
+rewrites/
 
 # output的生成文件
 test-idea.*

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime
 
@@ -40,7 +41,7 @@ from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
 from arc_summary import generate_arc_summary, write_arc_summary
-from materials import pick_outline_for_chapter
+from materials import pick_outline_for_chapter, build_materials_bundle
 
 
 def main():
@@ -126,6 +127,16 @@ def main():
     parser.add_argument("--yes", action="store_true", help="跳过所有确认（危险：会直接应用/归档）。适合自动化")
     parser.add_argument("--llm-mode", type=str, default="", help="运行模式：template / llm / auto（覆盖配置）")
     parser.add_argument("--debug", action="store_true", help="开启debug日志（写入debug.jsonl与call_graph.md）")
+    # 重申：对 outputs/current 的既有章节做“同等要求”的审稿+改写（逐章）
+    parser.add_argument(
+        "--restate",
+        action="store_true",
+        help="重申模式：以隔离工作区运行（rewrites/*），逐章审稿并按需改写（通过则不改写）",
+    )
+    parser.add_argument("--restate-max-reviews", type=int, default=3, help="重申：每章最多审稿次数（>=2；包含最终验收审稿）")
+    parser.add_argument("--restate-start", type=int, default=None, help="重申：只处理从该章开始（含）")
+    parser.add_argument("--restate-end", type=int, default=None, help="重申：只处理到该章结束（含）")
+    parser.add_argument("--rewrite-file", type=str, default="", help="重写/重申：用户额外指导意见文件（UTF-8），注入 writer/editor")
     args = parser.parse_args()
 
     # 统一相对路径解析基准：
@@ -191,6 +202,19 @@ def main():
         if style_from_file is not None and not style_from_file.strip():
             style_from_file = ""
 
+    # rewrite 指导：从文件读取（用于 --restate；不写入 Canon）
+    rewrite_from_file: str | None = None
+    rewrite_file_path: str = ""
+    if args.rewrite_file and args.rewrite_file.strip():
+        rp = _resolve_user_path(args.rewrite_file.strip(), base_dir=config_dir)
+        if not os.path.exists(rp):
+            raise FileNotFoundError(f"未找到 rewrite 指导文件：{rp}")
+        with open(rp, "r", encoding="utf-8-sig") as f:
+            rewrite_from_file = f.read().strip()
+        rewrite_file_path = rp
+        if rewrite_from_file is not None and not rewrite_from_file.strip():
+            rewrite_from_file = ""
+
     settings = load_settings(
         config_abs,
         idea=idea_from_file if idea_from_file is not None else args.idea,
@@ -245,6 +269,646 @@ def main():
             return True
         ans = input(msg).strip().lower()
         return ans in ("y", "yes", "是", "确认")
+
+    # ============================
+    # 重申模式：复审 + 改写 outputs/current
+    # ============================
+    if args.restate:
+        max_reviews = int(args.restate_max_reviews or 0)
+        if max_reviews < 2:
+            raise ValueError("--restate-max-reviews 必须 >= 2（至少需要：1次审稿 + 1次改写后的验收审稿）")
+
+        # === 重申隔离工作区：先克隆 current -> rewrites/...，后续只在 rewrites 下读写，避免影响原 current ===
+        src_run_dir = os.path.join(output_base, "current")
+        if not os.path.exists(src_run_dir):
+            raise FileNotFoundError(f"未找到尝试输出目录：{src_run_dir}（请先运行一次生成流程）")
+
+        src_proj_dir = os.path.join(output_base, "projects", "current")
+        if not os.path.exists(src_proj_dir):
+            raise FileNotFoundError(f"未找到项目 current 目录：{src_proj_dir}（请先确保项目资产已准备好）")
+
+        # rewrites 与 outputs 平级：<repo>/outputs + <repo>/rewrites
+        rewrites_root = os.path.join(os.path.dirname(output_base), "rewrites")
+        dst_run_dir = os.path.join(rewrites_root, "outputs", "current")
+        dst_proj_dir = os.path.join(rewrites_root, "projects", "current")
+
+        def _clone_dir(src: str, dst: str) -> None:
+            # 若 dst 已存在，则先备份改名（避免覆盖用户之前的 rewrite 结果）
+            if os.path.exists(dst):
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                bak = f"{dst}.bak.{ts}"
+                try:
+                    os.rename(dst, bak)
+                except Exception:
+                    shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+
+        _clone_dir(src_run_dir, dst_run_dir)
+        _clone_dir(src_proj_dir, dst_proj_dir)
+
+        current_dir = dst_run_dir
+        project_dir = dst_proj_dir
+        chapters_dir_current = os.path.join(current_dir, "chapters")
+        if not os.path.exists(chapters_dir_current):
+            raise FileNotFoundError(f"未找到章节目录：{chapters_dir_current}（请先确认 outputs/current/chapters 存在）")
+
+        # 读取 run_meta（用于 target_words/章节数等默认参数；重申依赖资产以 projects/rewrite 为准）
+        meta = read_json(os.path.join(current_dir, "run_meta.json")) or {}
+
+        ensure_canon_files(project_dir)
+        mem_dirs = ensure_memory_dirs(project_dir)
+        ensure_materials_files(project_dir)
+
+        # planner_result 优先从 projects/current/project_meta.json 取（项目级口径）；缺失再回退到 outputs/current
+        planner_result: dict = {}
+        pm_current = read_json(os.path.join(project_dir, "project_meta.json")) or {}
+        if isinstance(pm_current.get("planner_result"), dict):
+            planner_result = pm_current.get("planner_result") or {}
+        if not planner_result:
+            planner_result = read_json(os.path.join(current_dir, "planner.json")) or {}
+        if not planner_result:
+            raise ValueError(
+                "重申模式需要 planner_result：未找到 outputs/projects/current/project_meta.json 的 planner_result，且 outputs/current/planner.json 也不存在"
+            )
+
+        # materials_bundle：以 projects/current 的 canon+materials 组装为准（与生成模式一致的“项目级资产口径”）
+        materials_bundle: dict = {}
+        try:
+            world = read_json(os.path.join(project_dir, "canon", "world.json")) or {}
+            characters = read_json(os.path.join(project_dir, "canon", "characters.json")) or {}
+            outline = read_json(os.path.join(project_dir, "materials", "outline.json")) or {}
+            tone = read_json(os.path.join(project_dir, "materials", "tone.json")) or {}
+            project_name = str((pm_current.get("project_name") or "")).strip() or str(planner_result.get("项目名称", "") or "").strip()
+            idea_text = str((pm_current.get("idea") or "")).strip() or str(settings.idea or "")
+            materials_bundle = build_materials_bundle(
+                project_name=project_name,
+                idea=idea_text,
+                world=world,
+                characters=characters,
+                outline=outline,
+                tone=tone,
+                materials_pack=None,
+                version="restate_v1",
+            )
+        except Exception:
+            materials_bundle = {}
+        if not materials_bundle:
+            # 兜底：按旧逻辑回退
+            try:
+                materials_bundle = load_materials_bundle(project_dir)
+            except Exception:
+                materials_bundle = {}
+
+        # 初始化 LLM（重申也遵循 llm_mode/force_llm 等规则）
+        llm = None
+        force_llm = settings.llm_mode == "llm"
+        try:
+            # 重申日志单独落盘，避免污染原 debug.jsonl
+            logger = RunLogger(path=os.path.join(current_dir, "restate_debug.jsonl"), enabled=bool(settings.debug))
+            with logger.span("llm_init", llm_mode=settings.llm_mode):
+                if settings.llm_mode == "template":
+                    llm = None
+                elif settings.llm_mode == "llm":
+                    llm = try_get_chat_llm(settings.llm)
+                    if llm is None:
+                        raise RuntimeError(
+                            "LLM_MODE=llm 但未能初始化LLM（请检查LLM_*环境变量或config.toml的[llm]配置与依赖安装）"
+                        )
+                else:  # auto
+                    llm = try_get_chat_llm(settings.llm)
+        except Exception:
+            raise
+
+        # 章节枚举：只处理 3位编号 md（001.md）
+        def _list_existing_chapter_ids() -> list[int]:
+            out: list[int] = []
+            for name in os.listdir(chapters_dir_current):
+                if not name.endswith(".md"):
+                    continue
+                if name.endswith(".editor.md"):
+                    continue
+                base = name[:-3]
+                if not base.isdigit():
+                    continue
+                try:
+                    idx = int(base)
+                except Exception:
+                    continue
+                if idx > 0:
+                    out.append(idx)
+            out.sort()
+            return out
+
+        existing_ids = _list_existing_chapter_ids()
+        if not existing_ids:
+            raise ValueError(f"重申模式未找到章节正文：{chapters_dir_current} 下不存在 001.md 这类文件")
+
+        # 目标章节数：优先使用本次命令行 --chapters；否则用 run_meta；最后才回退到已有最大章
+        chapters_total = 0
+        if args.chapters is not None:
+            chapters_total = int(args.chapters or 0)
+        if chapters_total <= 0:
+            chapters_total = int(meta.get("chapters", 0) or 0)
+        if chapters_total <= 0:
+            chapters_total = max(existing_ids)
+        chapters_total = max(1, int(chapters_total))
+
+        s = int(args.restate_start) if args.restate_start is not None else 1
+        e = int(args.restate_end) if args.restate_end is not None else int(chapters_total)
+        s = max(1, int(s))
+        e = max(s, min(int(chapters_total), int(e)))
+        chapter_ids = list(range(s, e + 1))
+
+        # 基础 state（尽量与生成流程一致）
+        base_state: StoryState = {
+            "user_input": str(settings.idea or ""),
+            "idea_source_text": "",
+            "idea_file_path": str(meta.get("idea_file_path", "") or ""),
+            "target_words": int(meta.get("target_words", settings.gen.target_words) or settings.gen.target_words),
+            "max_rewrites": max_reviews - 1,  # 适配既有 writer/editor “返工”语义：1次初稿后最多返工 N 次
+            "chapters_total": int(chapters_total),
+            "writer_version": 0,
+            "llm": llm,
+            "llm_mode": settings.llm_mode,
+            "force_llm": force_llm,
+            "debug": bool(settings.debug),
+            "logger": logger,
+            "output_dir": current_dir,
+            "project_dir": project_dir,
+            "stage": str(meta.get("stage", settings.stage) or settings.stage),
+            "memory_recent_k": int(meta.get("memory_recent_k", settings.memory_recent_k) or settings.memory_recent_k),
+            "include_unapproved_memories": bool(meta.get("include_unapproved_memories", False)),
+            "style_override": str(meta.get("style_override", "") or ""),
+            "paragraph_rules": str(meta.get("paragraph_rules", "") or ""),
+            "editor_min_issues": int(meta.get("editor_min_issues", settings.editor_min_issues) or settings.editor_min_issues),
+            "editor_retry_on_invalid": int(meta.get("editor_retry_on_invalid", settings.editor_retry_on_invalid) or settings.editor_retry_on_invalid),
+            "llm_max_attempts": int(meta.get("llm_max_attempts", settings.llm_max_attempts) or settings.llm_max_attempts),
+            "llm_retry_base_sleep_s": float(meta.get("llm_retry_base_sleep_s", settings.llm_retry_base_sleep_s) or settings.llm_retry_base_sleep_s),
+            "writer_min_ratio": float(meta.get("writer_min_ratio", getattr(settings, "writer_min_ratio", 0.75)) or getattr(settings, "writer_min_ratio", 0.75)),
+            "writer_max_ratio": float(meta.get("writer_max_ratio", getattr(settings, "writer_max_ratio", 1.25)) or getattr(settings, "writer_max_ratio", 1.25)),
+            "enable_arc_summary": bool(meta.get("enable_arc_summary", settings.enable_arc_summary)),
+            "arc_every_n": int(meta.get("arc_every_n", settings.arc_every_n) or settings.arc_every_n),
+            "arc_recent_k": int(meta.get("arc_recent_k", settings.arc_recent_k) or settings.arc_recent_k),
+            "auto_apply_updates": "off",
+            "planner_result": planner_result if isinstance(planner_result, dict) else {},
+            "planner_json": json.dumps(planner_result, ensure_ascii=False, indent=2) if isinstance(planner_result, dict) else "",
+            "planner_used_llm": bool(meta.get("planner_used_llm", False)),
+            "materials_bundle": materials_bundle if isinstance(materials_bundle, dict) else {},
+            "rewrite_instructions": str(rewrite_from_file or ""),
+        }
+
+        # 记录重写指导（便于追溯）
+        try:
+            if rewrite_from_file is not None:
+                write_text(os.path.join(current_dir, "rewrite_instructions.txt"), str(rewrite_from_file or ""))
+                write_text(os.path.join(current_dir, "rewrite_instructions.path.txt"), str(rewrite_file_path or ""))
+        except Exception:
+            pass
+
+        # 重申产物目录：保存中间稿（不影响最终覆盖的 chapters/*.md）
+        restate_dir = os.path.join(current_dir, "restate")
+        restate_ch_dir = os.path.join(restate_dir, "chapters")
+        os.makedirs(restate_ch_dir, exist_ok=True)
+
+        def _backup(path: str) -> str:
+            if not os.path.exists(path):
+                return ""
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            bak = f"{path}.bak.{ts}"
+            try:
+                import shutil as _sh
+                _sh.copy2(path, bak)
+            except Exception:
+                return ""
+            return bak
+
+        # 逐章：已有正文 -> 复审+按需改写；缺失/失败 -> 走正常生成（补齐章节）
+        from agents.editor import editor_agent
+        from agents.writer import writer_agent
+        from agents.memory import memory_agent
+        from agents.canon_update import canon_update_agent
+        from agents.materials_update import materials_update_agent
+        from agents.screenwriter import screenwriter_agent
+
+        chapter_app = build_chapter_app()
+
+        logger.event(
+            "restate_start",
+            chapters=len(chapter_ids),
+            max_reviews=max_reviews,
+            chapters_dir=chapters_dir_current,
+            chapters_total=int(chapters_total),
+            range_start=int(s),
+            range_end=int(e),
+        )
+
+        planned_state: StoryState = dict(base_state)
+
+        def _clear_error_file(chap_id: str) -> None:
+            err_path = os.path.join(chapters_dir_current, f"{chap_id}.error.json")
+            if not os.path.exists(err_path):
+                return
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            try:
+                os.rename(err_path, f"{err_path}.bak.{ts}")
+            except Exception:
+                try:
+                    os.remove(err_path)
+                except Exception:
+                    pass
+
+        def _maybe_extend_outline(chapter_index: int) -> None:
+            # 复用主流程的“分块生成细纲”策略：缺细纲时才扩展
+            try:
+                mb0 = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+                if not isinstance(mb0, dict):
+                    return
+                chap_outline = pick_outline_for_chapter(mb0, int(chapter_index))
+                if chap_outline:
+                    return
+                block = 20
+                start_i = int(chapter_index)
+                end_i = min(int(chapters_total), start_i + block - 1)
+                tmp_state = dict(planned_state)
+                tmp_state["outline_start"] = start_i
+                tmp_state["outline_end"] = end_i
+                tmp_state["materials_bundle"] = mb0
+                tmp_state = screenwriter_agent(tmp_state)
+                new_outline = tmp_state.get("screenwriter_result") if isinstance(tmp_state.get("screenwriter_result"), dict) else {}
+                if not isinstance(new_outline, dict) or not new_outline:
+                    return
+                outline0 = mb0.get("outline") if isinstance(mb0.get("outline"), dict) else {}
+                chs0 = outline0.get("chapters") if isinstance(outline0.get("chapters"), list) else []
+                by_idx: dict[int, dict] = {}
+                for it in chs0:
+                    if isinstance(it, dict):
+                        try:
+                            by_idx[int(it.get("chapter_index", 0) or 0)] = it
+                        except Exception:
+                            pass
+                for it in (new_outline.get("chapters") if isinstance(new_outline.get("chapters"), list) else []):
+                    if isinstance(it, dict):
+                        try:
+                            by_idx[int(it.get("chapter_index", 0) or 0)] = it
+                        except Exception:
+                            pass
+                merged_chs = [by_idx[k] for k in sorted([k for k in by_idx.keys() if k > 0])]
+                outline0 = dict(outline0)
+                if not str(outline0.get("main_arc", "") or "").strip() and str(new_outline.get("main_arc", "") or "").strip():
+                    outline0["main_arc"] = new_outline.get("main_arc", "")
+                if (not outline0.get("themes")) and new_outline.get("themes"):
+                    outline0["themes"] = new_outline.get("themes", [])
+                outline0["chapters"] = merged_chs
+                mb0 = dict(mb0)
+                mb0["outline"] = outline0
+                planned_state["materials_bundle"] = mb0
+                planned_state["screenwriter_result"] = outline0
+                try:
+                    materials_dir_current = os.path.join(current_dir, "materials")
+                    os.makedirs(materials_dir_current, exist_ok=True)
+                    write_json(os.path.join(materials_dir_current, "outline.json"), outline0)  # type: ignore[arg-type]
+                    write_json(os.path.join(materials_dir_current, "materials_bundle.json"), mb0)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            except Exception:
+                # 细纲扩展失败不阻断后续生成
+                return
+
+        def _maybe_write_arc_summary(idx: int) -> None:
+            # 与主流程一致：arc 结束点优先，否则每 N 章兜底
+            try:
+                enable_arc = bool(planned_state.get("enable_arc_summary", True))
+                every_n = int(planned_state.get("arc_every_n", 10) or 10)
+                if not (enable_arc and llm):
+                    return
+                should_write = False
+                start_arc = None
+                try:
+                    mbx = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+                    outx = mbx.get("outline") if isinstance(mbx.get("outline"), dict) else {}
+                    chs = outx.get("chapters") if isinstance(outx.get("chapters"), list) else []
+                    cur = None
+                    nxt = None
+                    for it in chs:
+                        if isinstance(it, dict) and int(it.get("chapter_index", 0) or 0) == int(idx):
+                            cur = it
+                        if isinstance(it, dict) and int(it.get("chapter_index", 0) or 0) == int(idx) + 1:
+                            nxt = it
+                    cur_arc = str((cur or {}).get("arc_id", "") or "").strip()
+                    nxt_arc = str((nxt or {}).get("arc_id", "") or "").strip()
+                    if cur_arc and nxt is not None and nxt_arc and (cur_arc != nxt_arc):
+                        should_write = True
+                        s0 = int(idx)
+                        for it in chs:
+                            if not isinstance(it, dict):
+                                continue
+                            if str(it.get("arc_id", "") or "").strip() != cur_arc:
+                                continue
+                            try:
+                                ci = int(it.get("chapter_index", 0) or 0)
+                            except Exception:
+                                continue
+                            if 0 < ci < s0:
+                                s0 = ci
+                        start_arc = s0
+                except Exception:
+                    should_write = False
+                    start_arc = None
+                if (not should_write) and every_n > 0 and (idx % every_n == 0):
+                    should_write = True
+                    start_arc = max(1, idx - every_n + 1)
+                if should_write and start_arc:
+                    arc_name = f"arc_{int(start_arc):03d}-{int(idx):03d}.json"
+                    arc_path = os.path.join(project_dir, "memory", "arcs", arc_name)
+                    if not os.path.exists(arc_path):
+                        arc = generate_arc_summary(
+                            llm=llm,
+                            project_dir=project_dir,
+                            start_chapter=int(start_arc),
+                            end_chapter=int(idx),
+                            logger=logger,
+                            llm_max_attempts=int(planned_state.get("llm_max_attempts", 3) or 3),
+                            llm_retry_base_sleep_s=float(planned_state.get("llm_retry_base_sleep_s", 1.0) or 1.0),
+                        )
+                        if isinstance(arc, dict) and arc:
+                            p = write_arc_summary(project_dir, int(start_arc), int(idx), arc)
+                            try:
+                                logger.event(
+                                    "arc_summary_written",
+                                    chapter_index=idx,
+                                    start_chapter=int(start_arc),
+                                    end_chapter=idx,
+                                    path=os.path.relpath(p, output_base).replace("\\", "/"),
+                                )
+                            except Exception:
+                                pass
+            except Exception as e:
+                try:
+                    logger.event("arc_summary_error", chapter_index=idx, error_type=e.__class__.__name__, error=str(e))
+                except Exception:
+                    pass
+
+        for idx in chapter_ids:
+            chap_id = f"{int(idx):03d}"
+            md_path = os.path.join(chapters_dir_current, f"{chap_id}.md")
+            err_path = os.path.join(chapters_dir_current, f"{chap_id}.error.json")
+
+            logger.event("restate_chapter_start", chapter_index=int(idx))
+
+            # 判断：有正文就走“复审”；缺失/空/只有 error.json 就走“生成”
+            cur_text = ""
+            if os.path.exists(md_path):
+                try:
+                    with open(md_path, "r", encoding="utf-8") as f:
+                        cur_text = f.read().strip()
+                except Exception:
+                    cur_text = ""
+            need_generate = (not cur_text) and (int(idx) <= int(chapters_total))
+            if need_generate or (os.path.exists(err_path) and (not cur_text)):
+                # === 生成缺失/失败章节 ===
+                try:
+                    _maybe_extend_outline(int(idx))
+                    chapter_state: StoryState = {
+                        **planned_state,
+                        "chapter_index": int(idx),
+                        "writer_version": 0,
+                        "needs_rewrite": False,
+                        "editor_feedback": [],
+                        "editor_decision": "",
+                        "editor_report": {},
+                        "canon_suggestions": [],
+                        "canon_update_suggestions": [],
+                        "writer_used_llm": False,
+                        "editor_used_llm": False,
+                        "chapter_memory": {},
+                        "memory_used_llm": False,
+                        "materials_update_used": False,
+                        "materials_update_suggestions": [],
+                        "project_dir": project_dir,
+                    }
+                    st = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
+                except Exception as e:
+                    import traceback as _tb
+
+                    err = {
+                        "chapter_index": int(idx),
+                        "error_type": e.__class__.__name__,
+                        "error": str(e),
+                        "traceback": "".join(_tb.format_exception(type(e), e, e.__traceback__))[:20000],
+                    }
+                    try:
+                        logger.event(
+                            "restate_chapter_error",
+                            chapter_index=int(idx),
+                            error_type=err["error_type"],
+                            error=err["error"],
+                            action="generate",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        write_json(os.path.join(chapters_dir_current, f"{chap_id}.error.json"), err)  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    continue
+
+                # 落盘最终稿（生成）
+                try:
+                    _backup(md_path)
+                    write_text(md_path, str((st or {}).get("writer_result", "") or ""))
+                    _clear_error_file(chap_id)
+                except Exception:
+                    pass
+
+                decision = (st or {}).get("editor_decision", "")
+                feedback = (st or {}).get("editor_feedback", []) or []
+                editor_report = (st or {}).get("editor_report") or {}
+                canon_suggestions = (st or {}).get("canon_suggestions") or []
+                canon_update_suggestions = (st or {}).get("canon_update_suggestions") or []
+                materials_update_suggestions = (st or {}).get("materials_update_suggestions") or []
+
+                try:
+                    if str(decision).strip() == "审核通过":
+                        write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
+                    else:
+                        lines = ["审核不通过", "", *[f"- {x}" for x in feedback]]
+                        write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
+                    if isinstance(editor_report, dict) and editor_report:
+                        _backup(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"))
+                        write_json(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"), editor_report)
+                except Exception:
+                    pass
+
+                # memory：current + projects
+                try:
+                    mem = (st or {}).get("chapter_memory") or {}
+                    if isinstance(mem, dict) and mem:
+                        _backup(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"))
+                        write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem)
+                        write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem)
+                except Exception:
+                    pass
+
+                # suggestions：只落盘
+                try:
+                    if isinstance(canon_suggestions, list) and canon_suggestions:
+                        write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_suggestions.json"), {"items": canon_suggestions})
+                    if isinstance(canon_update_suggestions, list) and canon_update_suggestions:
+                        write_json(
+                            os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"),
+                            {"items": canon_update_suggestions},
+                        )
+                    if isinstance(materials_update_suggestions, list) and materials_update_suggestions:
+                        write_json(
+                            os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"),
+                            {"items": materials_update_suggestions},
+                        )
+                except Exception:
+                    pass
+
+                _maybe_write_arc_summary(int(idx))
+
+                logger.event(
+                    "restate_chapter_end",
+                    chapter_index=int(idx),
+                    mode="generate",
+                    writer_version=int((st or {}).get("writer_version", 0) or 0),
+                    editor_decision=str((st or {}).get("editor_decision", "") or ""),
+                    writer_chars=len(str((st or {}).get("writer_result", "") or "")),
+                )
+                continue
+
+            if not cur_text:
+                # 没有正文且不在目标范围（理论上不会发生），跳过
+                continue
+
+            # === 复审已有正文 ===
+            try:
+                # 保存原稿快照
+                write_text(os.path.join(restate_ch_dir, f"{chap_id}.v0.md"), cur_text)
+
+                st2: StoryState = dict(base_state)
+                st2["chapter_index"] = int(idx)
+                st2["writer_result"] = cur_text
+                # 视作“已存在初稿=第1版”，便于 editor 轮次策略与后续 rewrite 语义一致
+                st2["writer_version"] = 1
+                st2["needs_rewrite"] = False
+                st2["editor_feedback"] = []
+                st2["editor_report"] = {}
+                st2["editor_decision"] = ""
+                st2["canon_suggestions"] = []
+                st2["canon_update_suggestions"] = []
+                st2["materials_update_suggestions"] = []
+
+                reviews_used = 0
+                st2["editor_strict_mode"] = True
+                st2 = editor_agent(st2)
+                st2["editor_strict_mode"] = False
+                reviews_used += 1
+                try:
+                    write_json(os.path.join(restate_ch_dir, f"{chap_id}.v0.editor.json"), st2.get("editor_report") or {})
+                except Exception:
+                    pass
+
+                while str(st2.get("editor_decision", "") or "").strip() != "审核通过":
+                    if reviews_used >= max_reviews:
+                        break
+                    st2["needs_rewrite"] = True
+                    st2 = writer_agent(st2)
+                    cur_text2 = str(st2.get("writer_result", "") or "").strip()
+                    v2 = int(st2.get("writer_version", 0) or 0)
+                    write_text(os.path.join(restate_ch_dir, f"{chap_id}.v{v2}.md"), cur_text2)
+
+                    st2["editor_strict_mode"] = (reviews_used < (max_reviews - 1))
+                    st2 = editor_agent(st2)
+                    st2["editor_strict_mode"] = False
+                    reviews_used += 1
+                    v = int(st2.get("writer_version", 0) or 0)
+                    try:
+                        write_json(os.path.join(restate_ch_dir, f"{chap_id}.v{v}.editor.json"), st2.get("editor_report") or {})
+                    except Exception:
+                        pass
+
+                try:
+                    st2 = memory_agent(st2)
+                    st2 = canon_update_agent(st2)
+                    st2 = materials_update_agent(st2)
+                except Exception:
+                    pass
+
+                _backup(md_path)
+                write_text(md_path, str(st2.get("writer_result", "") or ""))
+                _clear_error_file(chap_id)
+
+                decision2 = str(st2.get("editor_decision", "") or "")
+                feedback2 = st2.get("editor_feedback") or []
+                editor_report2 = st2.get("editor_report") or {}
+                if decision2 == "审核通过":
+                    write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
+                else:
+                    lines = ["审核不通过", "", *[f"- {x}" for x in feedback2]]
+                    write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
+                if isinstance(editor_report2, dict) and editor_report2:
+                    _backup(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"))
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"), editor_report2)
+
+                mem2 = st2.get("chapter_memory") or {}
+                if isinstance(mem2, dict) and mem2:
+                    _backup(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"))
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem2)
+                    write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem2)
+
+                canon_suggestions2 = st2.get("canon_suggestions") or []
+                if isinstance(canon_suggestions2, list) and canon_suggestions2:
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_suggestions.json"), {"items": canon_suggestions2})
+                canon_update_suggestions2 = st2.get("canon_update_suggestions") or []
+                if isinstance(canon_update_suggestions2, list) and canon_update_suggestions2:
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"), {"items": canon_update_suggestions2})
+                materials_update_suggestions2 = st2.get("materials_update_suggestions") or []
+                if isinstance(materials_update_suggestions2, list) and materials_update_suggestions2:
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"), {"items": materials_update_suggestions2})
+
+                _maybe_write_arc_summary(int(idx))
+
+                logger.event(
+                    "restate_chapter_end",
+                    chapter_index=int(idx),
+                    mode="review",
+                    reviews_used=reviews_used,
+                    writer_version=int(st2.get("writer_version", 0) or 0),
+                    editor_decision=str(st2.get("editor_decision", "") or ""),
+                    writer_chars=len(str(st2.get("writer_result", "") or "")),
+                )
+            except Exception as e:
+                import traceback as _tb
+
+                err = {
+                    "chapter_index": int(idx),
+                    "error_type": e.__class__.__name__,
+                    "error": str(e),
+                    "traceback": "".join(_tb.format_exception(type(e), e, e.__traceback__))[:20000],
+                }
+                try:
+                    logger.event(
+                        "restate_chapter_error",
+                        chapter_index=int(idx),
+                        error_type=err["error_type"],
+                        error=err["error"],
+                        action="review",
+                    )
+                except Exception:
+                    pass
+                try:
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.error.json"), err)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                continue
+
+        logger.event("restate_end")
+        print(f"\n重申完成（不影响原 current）。")
+        print(f"- 运行产物：{current_dir}")
+        print(f"- 项目资产：{project_dir}")
+        return
 
     # 手动归档模式：你review完 outputs/current 后再跑一次这个命令即可入库
     if args.archive_only:
