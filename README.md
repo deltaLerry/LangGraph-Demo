@@ -216,8 +216,8 @@ python main.py \
   --target-words 2500 \
   --chapters 200 \
   --restate \
-  --restate-max-reviews 3 \
-  --max-rewrites 3 \
+  --restate-max-reviews 5 \
+  --max-rewrites 5 \
   --editor-min-issues 5 \
   --editor-retry-on-invalid 1 \
   --llm-max-attempts 3 \

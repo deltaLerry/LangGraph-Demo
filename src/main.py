@@ -270,14 +270,21 @@ def main():
         if not os.path.exists(src_run_dir):
             raise FileNotFoundError(f"未找到尝试输出目录：{src_run_dir}（请先运行一次生成流程）")
 
-        src_proj_dir = os.path.join(output_base, "projects", "current")
+        # 关键：项目资产目录必须跟随 outputs/current/run_meta.json 里记录的 project_dir，
+        # 否则会读错 canon/memory/materials（例如 arc summaries 明明在 projects/<project>/memory/arcs 但这里读不到）。
+        src_run_meta = read_json(os.path.join(src_run_dir, "run_meta.json")) or {}
+        rel_project_dir = str(src_run_meta.get("project_dir") or "").strip()
+        if not rel_project_dir:
+            raise ValueError("重申模式需要 outputs/current/run_meta.json 的 project_dir（请先用最新流程跑一次生成以写入 run_meta.json）")
+        src_proj_dir = os.path.join(output_base, rel_project_dir.replace("/", os.sep))
         if not os.path.exists(src_proj_dir):
-            raise FileNotFoundError(f"未找到项目 current 目录：{src_proj_dir}（请先确保项目资产已准备好）")
+            raise FileNotFoundError(f"未找到项目目录：{src_proj_dir}（来自 run_meta.json.project_dir={rel_project_dir}）")
 
         # rewrites 与 outputs 平级：<repo>/outputs + <repo>/rewrites
         rewrites_root = os.path.join(os.path.dirname(output_base), "rewrites")
         dst_run_dir = os.path.join(rewrites_root, "outputs", "current")
-        dst_proj_dir = os.path.join(rewrites_root, "projects", "current")
+        # 让 rewrites 下的 projects 结构与原 project_dir 保持一致（例如 projects/<project>）
+        dst_proj_dir = os.path.join(rewrites_root, rel_project_dir.replace("/", os.sep))
 
         def _clone_dir(src: str, dst: str) -> None:
             # 若 dst 已存在，则先备份改名（避免覆盖用户之前的 rewrite 结果）
@@ -306,7 +313,7 @@ def main():
         mem_dirs = ensure_memory_dirs(project_dir)
         ensure_materials_files(project_dir)
 
-        # planner_result 优先从 projects/current/project_meta.json 取（项目级口径）；缺失再回退到 outputs/current
+        # planner_result 优先从 project_dir/project_meta.json 取（项目级口径）；缺失再回退到 outputs/current
         planner_result: dict = {}
         pm_current = read_json(os.path.join(project_dir, "project_meta.json")) or {}
         if isinstance(pm_current.get("planner_result"), dict):
@@ -315,10 +322,10 @@ def main():
             planner_result = read_json(os.path.join(current_dir, "planner.json")) or {}
         if not planner_result:
             raise ValueError(
-                "重申模式需要 planner_result：未找到 outputs/projects/current/project_meta.json 的 planner_result，且 outputs/current/planner.json 也不存在"
+                "重申模式需要 planner_result：未找到 project_meta.json 的 planner_result，且 outputs/current/planner.json 也不存在"
             )
 
-        # materials_bundle：以 projects/current 的 canon+materials 组装为准（与生成模式一致的“项目级资产口径”）
+        # materials_bundle：以 project_dir 的 canon+materials 组装为准（与生成模式一致的“项目级资产口径”）
         materials_bundle: dict = {}
         try:
             world = read_json(os.path.join(project_dir, "canon", "world.json")) or {}
@@ -440,7 +447,8 @@ def main():
             "enable_arc_summary": bool(meta.get("enable_arc_summary", settings.enable_arc_summary)),
             "arc_every_n": int(meta.get("arc_every_n", settings.arc_every_n) or settings.arc_every_n),
             "arc_recent_k": int(meta.get("arc_recent_k", settings.arc_recent_k) or settings.arc_recent_k),
-            "auto_apply_updates": "off",
+            # 重申模式也支持安全自动沉淀（写入 rewrites/projects/...，不影响原 projects）
+            "auto_apply_updates": str(meta.get("auto_apply_updates", settings.auto_apply_updates) or settings.auto_apply_updates or "off"),
             "planner_result": planner_result if isinstance(planner_result, dict) else {},
             "planner_json": json.dumps(planner_result, ensure_ascii=False, indent=2) if isinstance(planner_result, dict) else "",
             "planner_used_llm": bool(meta.get("planner_used_llm", False)),
@@ -494,6 +502,107 @@ def main():
         )
 
         planned_state: StoryState = dict(base_state)
+
+        def _refresh_materials_bundle() -> None:
+            # 若 materials/canon 被自动沉淀更新，则刷新 materials_bundle 让后续章节 prompt 立即受益
+            try:
+                pmx = read_json(os.path.join(project_dir, "project_meta.json")) or {}
+                prx = planned_state.get("planner_result") if isinstance(planned_state.get("planner_result"), dict) else {}
+                world = read_json(os.path.join(project_dir, "canon", "world.json")) or {}
+                characters = read_json(os.path.join(project_dir, "canon", "characters.json")) or {}
+                outline = read_json(os.path.join(project_dir, "materials", "outline.json")) or {}
+                tone = read_json(os.path.join(project_dir, "materials", "tone.json")) or {}
+                project_name = str((pmx.get("project_name") or "")).strip() or str((prx or {}).get("项目名称", "") or "").strip()
+                idea_text = str((pmx.get("idea") or "")).strip() or str(settings.idea or "")
+                mb = build_materials_bundle(
+                    project_name=project_name,
+                    idea=idea_text,
+                    world=world,
+                    characters=characters,
+                    outline=outline,
+                    tone=tone,
+                    materials_pack=None,
+                    version="restate_v1",
+                )
+                if isinstance(mb, dict) and mb:
+                    planned_state["materials_bundle"] = mb
+            except Exception:
+                return
+
+        def _maybe_auto_apply_updates(*, chap_id: str, canon_suggestions: list, canon_update_suggestions: list, materials_update_suggestions: list) -> None:
+            # 复用主流程 safe 策略：在隔离的 rewrites/projects 下自动应用低风险补丁，让后续章节立即受益
+            try:
+                mode = str(planned_state.get("auto_apply_updates", "off") or "off").strip().lower()
+                if mode != "safe":
+                    return
+
+                # 1) materials_patch（安全幂等追加）——直接应用到 project_dir/materials
+                mats_items: list[dict] = []
+                if isinstance(materials_update_suggestions, list):
+                    for it in materials_update_suggestions:
+                        if not isinstance(it, dict):
+                            continue
+                        if str(it.get("action", "") or "").strip() == "materials_patch":
+                            mats_items.append(it)
+                mats_stats = {"applied": 0, "skipped": 0, "backups": []}
+                if mats_items:
+                    mats_stats = apply_materials_suggestions(project_dir=project_dir, items=mats_items, yes=True, dry_run=False)
+
+                # 2) canon_patch（严格白名单：只允许 world.notes / style.md 追加）
+                canon_items_all: list[dict] = []
+                for arr in (canon_suggestions, canon_update_suggestions, materials_update_suggestions):
+                    if isinstance(arr, list):
+                        for it in arr:
+                            if isinstance(it, dict):
+                                canon_items_all.append(it)
+
+                def _is_safe_canon_patch(it: dict) -> bool:
+                    act = str(it.get("action", "") or "").strip()
+                    if act != "canon_patch":
+                        return False
+                    cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
+                    target = str(cp.get("target", "") or "").strip()
+                    op = str(cp.get("op", "") or "").strip()
+                    path = str(cp.get("path", "") or "").strip()
+                    if target == "world.json" and op == "note" and (path in ("notes", "")):
+                        return True
+                    if target == "style.md" and op == "append":
+                        return True
+                    return False
+
+                canon_items = [it for it in canon_items_all if _is_safe_canon_patch(it)]
+                canon_stats = {"applied": 0, "skipped": 0, "backups": []}
+                if canon_items:
+                    canon_stats = apply_canon_suggestions(project_dir=project_dir, items=canon_items, yes=True, dry_run=False)
+
+                write_json(
+                    os.path.join(chapters_dir_current, f"{chap_id}.auto_apply.json"),
+                    {
+                        "mode": mode,
+                        "materials": {"items": len(mats_items), "stats": mats_stats},
+                        "canon": {"items": len(canon_items), "stats": canon_stats},
+                    },
+                )
+                try:
+                    logger.event(
+                        "auto_apply_updates",
+                        chapter_index=int(chap_id),
+                        mode=mode,
+                        materials_items=len(mats_items),
+                        canon_items=len(canon_items),
+                        materials_applied=int(mats_stats.get("applied", 0) or 0),
+                        canon_applied=int(canon_stats.get("applied", 0) or 0),
+                    )
+                except Exception:
+                    pass
+
+                # 应用后刷新材料包（让后续章节立即受益）
+                _refresh_materials_bundle()
+            except Exception as e:
+                try:
+                    logger.event("auto_apply_error", chapter_index=int(chap_id), error_type=e.__class__.__name__, error=str(e))
+                except Exception:
+                    pass
 
         def _clear_error_file(chap_id: str) -> None:
             err_path = os.path.join(chapters_dir_current, f"{chap_id}.error.json")
@@ -757,6 +866,12 @@ def main():
                 except Exception:
                     pass
 
+                _maybe_auto_apply_updates(
+                    chap_id=str(chap_id),
+                    canon_suggestions=canon_suggestions if isinstance(canon_suggestions, list) else [],
+                    canon_update_suggestions=canon_update_suggestions if isinstance(canon_update_suggestions, list) else [],
+                    materials_update_suggestions=materials_update_suggestions if isinstance(materials_update_suggestions, list) else [],
+                )
                 _maybe_write_arc_summary(int(idx))
 
                 logger.event(
@@ -859,6 +974,12 @@ def main():
                 if isinstance(materials_update_suggestions2, list) and materials_update_suggestions2:
                     write_json(os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"), {"items": materials_update_suggestions2})
 
+                _maybe_auto_apply_updates(
+                    chap_id=str(chap_id),
+                    canon_suggestions=canon_suggestions2 if isinstance(canon_suggestions2, list) else [],
+                    canon_update_suggestions=canon_update_suggestions2 if isinstance(canon_update_suggestions2, list) else [],
+                    materials_update_suggestions=materials_update_suggestions2 if isinstance(materials_update_suggestions2, list) else [],
+                )
                 _maybe_write_arc_summary(int(idx))
 
                 logger.event(
