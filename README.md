@@ -213,12 +213,12 @@ python main.py \
   --idea-file "test-idea.md" \
   --rewrite-file "rewrite-idea.md" \
   --project "规则之上：无限" \
-  --target-words 2500 \
+  --target-words 3500 \
   --chapters 200 \
   --restate \
-  --restate-max-reviews 5 \
-  --max-rewrites 5 \
-  --editor-min-issues 5 \
+  --restate-max-reviews 2 \
+  --max-rewrites 2 \
+  --editor-min-issues 8 \
   --editor-retry-on-invalid 1 \
   --llm-max-attempts 3 \
   --llm-retry-base-sleep-s 10.0 \
