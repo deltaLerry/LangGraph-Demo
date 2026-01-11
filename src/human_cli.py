@@ -204,6 +204,30 @@ def print_materials_review_card(
     print(f"- Execution：decisions={len(decisions)} glossary_terms={_count_glossary_terms(glossary)}")
     print(f"- Risk：open_questions={len(oq)} blockers={blockers}")
 
+    # DoD 契约校验摘要（可执行、可追溯；冻结必须 PASS）
+    try:
+        from materials_dod import validate_materials_pack_dod, dod_one_line
+
+        dod = validate_materials_pack_dod(obj)
+        print("\n【DoD（冻结门禁）】")
+        print("- " + dod_one_line(dod))
+        issues0 = dod.get("issues") if isinstance(dod.get("issues"), list) else []
+        if issues0:
+            # 只展示 Top，避免刷屏；详细见 v=全文 JSON 或 digests/dod_report.vNNN.json
+            shown = 0
+            for it in issues0:
+                if not isinstance(it, dict):
+                    continue
+                sev = str(it.get("severity", "") or "").strip()
+                path = str(it.get("path", "") or "").strip()
+                msg = str(it.get("message", "") or "").strip()
+                print(f"  - [{sev}] {path}: {msg}")
+                shown += 1
+                if shown >= 6:
+                    break
+    except Exception:
+        pass
+
     print("\n【约束（constraints）】")
     tw = constraints.get("target_words", None)
     wmin = constraints.get("writer_min_ratio", None)

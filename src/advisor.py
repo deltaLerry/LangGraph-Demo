@@ -27,6 +27,25 @@ def _count_blockers(open_questions: Any) -> int:
     return n
 
 
+def _pick_blockers(open_questions: Any, *, max_items: int = 20) -> List[Dict[str, Any]]:
+    """
+    从 open_questions 中挑出 blocker 项（不猜字段结构，原样保留 dict），用于审计/追溯。
+    """
+    if not isinstance(open_questions, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in open_questions:
+        if not isinstance(it, dict):
+            continue
+        sev = str(it.get("severity", "") or "").strip().lower()
+        blocking = it.get("blocking", None)
+        if sev == "blocker" or blocking is True:
+            out.append(dict(it))
+        if len(out) >= int(max_items):
+            break
+    return out
+
+
 def _extract_constraints(frozen_pack: Dict[str, Any]) -> Dict[str, Any]:
     exe = frozen_pack.get("execution") if isinstance(frozen_pack.get("execution"), dict) else {}
     c = exe.get("constraints") if isinstance(exe.get("constraints"), dict) else {}
@@ -62,11 +81,14 @@ def advisor_digest_line(advisor_report: Any, *, max_len: int = 120) -> str:
     """
     rep = advisor_report if isinstance(advisor_report, dict) else {}
     act = str(rep.get("suggested_action", "") or "").strip() or "N/A"
+    risk_level = str(rep.get("risk_level", "") or "").strip()
     findings = rep.get("findings") if isinstance(rep.get("findings"), list) else []
     top = ""
     if findings and isinstance(findings[0], dict):
         top = str(findings[0].get("message", "") or "").strip()
     s = f"建议={act}"
+    if risk_level:
+        s += f" | 风险={risk_level}"
     if top:
         s += f" | Top={top}"
     if len(s) > int(max_len):
@@ -119,7 +141,8 @@ def build_advisor_report(
 
     # blocker 兜底检查（理论上冻结门禁已阻止）
     oq = _get(frozen_pack, "risk.open_questions")
-    blockers = _count_blockers(oq)
+    blocker_items = _pick_blockers(oq)
+    blockers = len(blocker_items)
 
     findings: List[Dict[str, Any]] = []
 
@@ -255,9 +278,27 @@ def build_advisor_report(
     elif any(f.get("suggest") == "rewrite" for f in findings):
         suggested_action = "rewrite"
 
+    # 风险分级（轻量、可查询）：blocker > high > medium > low
+    # - blocker：材料包仍有 blocker open_questions（写作应暂停）
+    # - high：建议 rewrite（明显冲突/硬伤）
+    # - medium：有 findings 但不要求 rewrite
+    # - low：无 findings
+    risk_level = "low"
+    if blockers > 0:
+        risk_level = "blocker"
+    elif suggested_action == "escalate":
+        risk_level = "high"
+    elif suggested_action == "rewrite":
+        risk_level = "high"
+    elif len(findings) > 0:
+        risk_level = "medium"
+
     return {
         "suggested_action": suggested_action,
-        "digest": advisor_digest_line({"suggested_action": suggested_action, "findings": findings}),
+        "risk_level": risk_level,
+        "materials_blockers_count": int(blockers),
+        "materials_blockers": blocker_items,
+        "digest": advisor_digest_line({"suggested_action": suggested_action, "risk_level": risk_level, "findings": findings}),
         "stats": {
             "chars": chars,
             "target_words": target_words,

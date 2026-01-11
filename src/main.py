@@ -63,6 +63,7 @@ from change_proposals import (
     finalize_refreeze_from_draft,
 )
 from advisor import advisor_digest_line, build_advisor_report
+from materials_dod import validate_materials_pack_dod, dod_one_line
 from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
@@ -465,23 +466,27 @@ def main():
             return False, "", {}, {}
 
         # action == "f"
-        # 冻结前 DoD 门禁：blocker open_questions 必须为 0
-        try:
-            blockers, picked = count_open_question_blockers(obj if isinstance(obj, dict) else {})
-        except Exception:
-            blockers, picked = 0, []
-        if blockers > 0:
-            print("\n材料包存在 blocker open_questions，禁止冻结。请先回答/降级这些问题：")
-            for i, it in enumerate(picked[:10], start=1):
-                q = str(it.get("question", "") or it.get("q", "") or it.get("topic", "") or "").strip()
-                impact = str(it.get("impact", "") or "").strip()
-                print(f"- [{i}] {q or '（未命名问题）'}")
-                if impact:
-                    print(f"    impact: {impact[:200]}")
+        # 冻结前 DoD 门禁（硬契约）：blocker/major 必须为 0
+        dod = validate_materials_pack_dod(obj if isinstance(obj, dict) else {})
+        if not bool(dod.get("ok", False)):
+            print("\n材料包 DoD 未通过，禁止冻结：")
+            print("- " + dod_one_line(dod))
+            issues0 = dod.get("issues") if isinstance(dod.get("issues"), list) else []
+            shown = 0
+            for it in issues0:
+                if not isinstance(it, dict):
+                    continue
+                sev = str(it.get("severity", "") or "").strip()
+                path = str(it.get("path", "") or "").strip()
+                msg = str(it.get("message", "") or "").strip()
+                print(f"- [{sev}] {path}: {msg}")
+                shown += 1
+                if shown >= 10:
+                    break
             human_review = {
                 "version": ver,
                 "decision": "request_changes",
-                "notes": "DoD阻塞：存在 blocker open_questions，已拒绝冻结。请先补齐/降级后再冻结。",
+                "notes": f"DoD阻塞：{dod_one_line(dod)}。请按 issues 修订后再冻结。",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             try:
@@ -500,12 +505,30 @@ def main():
             "notes": human_notes,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-        frozen_version, frozen_path, anchors_path = freeze_materials_pack(
-            project_dir=project_dir,
-            draft_version=ver,
-            draft_obj=obj,
-            human_review=human_review,
-        )
+        try:
+            frozen_version, frozen_path, anchors_path = freeze_materials_pack(
+                project_dir=project_dir,
+                draft_version=ver,
+                draft_obj=obj,
+                human_review=human_review,
+            )
+        except Exception as e:
+            # 二次兜底：freeze_materials_pack 内也会做 DoD 校验
+            print(f"\n冻结失败：{e}")
+            human_review2 = {
+                "version": ver,
+                "decision": "request_changes",
+                "notes": f"冻结失败：{e}",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                from materials_freeze import ensure_materials_pack_dirs
+
+                p = ensure_materials_pack_dirs(project_dir)
+                write_json(os.path.join(p["reviews"], f"human_review.{ver}.json"), human_review2)
+            except Exception:
+                pass
+            return False, "", {}, {}
         print("\n=== 冻结完成 ===")
         print(f"- frozen：{frozen_path}")
         print(f"- anchors：{anchors_path}")
@@ -1872,6 +1895,8 @@ def main():
                         node="advisor",
                         chapter_index=int(idx),
                         advisor_suggested_action=str(advisor_report.get("suggested_action", "") or "").strip(),
+                        advisor_risk_level=str(advisor_report.get("risk_level", "") or "").strip(),
+                        advisor_blockers_count=int(advisor_report.get("materials_blockers_count", 0) or 0),
                         advisor_findings_count=len(findings_list),
                         advisor_rewrite_count=int(rewrite_count),
                         advisor_digest=digest,
@@ -1887,6 +1912,7 @@ def main():
         md_path = os.path.join(chapters_dir_current, f"{chap_id}.md")
         editor_json_path = os.path.join(chapters_dir_current, f"{chap_id}.editor.json")
         snapshot_dir = os.path.join(current_dir, "materials_snapshot")
+        max_rewrites = int(settings.gen.max_rewrites)
         # 打印 digest 审阅卡
         try:
             print_chapter_review_card(
@@ -1906,6 +1932,11 @@ def main():
 
         # 交互：允许先查看全文/JSON，再做决策
         while True:
+            ed_dec = str((final_state or {}).get("editor_decision", "") or "").strip()
+            # 非交互回归：仅在主编通过时自动 accept；否则默认停机，避免“静默推进”
+            default_action = "q"
+            if bool(args.yes) and ed_dec == "审核通过":
+                default_action = "a"
             action = prompt_choice(
                 "请选择动作",
                 choices={
@@ -1920,7 +1951,7 @@ def main():
                     "q": "Quit：退出（保留已产出文件；下次可继续）",
                 },
                 # 默认强人审；--yes 用于自动化/回归测试（明确跳过门禁交互）
-                default=("a" if bool(args.yes) else "q"),
+                default=default_action,
             )
             if action == "f":
                 print("\n--- 全文（md）---")
@@ -1960,6 +1991,33 @@ def main():
             break
 
         if action == "q":
+            # 记录：停机/退出也必须可追溯
+            try:
+                write_json(
+                    os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+                    {
+                        "chapter": idx,
+                        "decision": "quit",
+                        "rewrites_used": 0,
+                        "max_rewrites": int(max_rewrites),
+                        "materials_frozen_version": str(frozen_version or ""),
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+            except Exception:
+                pass
+            try:
+                logger.event(
+                    "human_chapter_review",
+                    node="human_gate",
+                    chapter_index=int(idx),
+                    human_decision="quit",
+                    rewrites_used=0,
+                    max_rewrites=int(max_rewrites),
+                    materials_frozen_version=str(frozen_version or ""),
+                )
+            except Exception:
+                pass
             print("\n已退出：你可以基于 outputs/current 继续。")
             return
 
@@ -2006,9 +2064,24 @@ def main():
                     "chapter": idx,
                     "decision": "escalate_proposal",
                     "notes": reason,
+                    "rewrites_used": 0,
+                    "max_rewrites": int(max_rewrites),
+                    "materials_frozen_version": str(frozen_version or ""),
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 },
             )
+            try:
+                logger.event(
+                    "human_chapter_review",
+                    node="human_gate",
+                    chapter_index=int(idx),
+                    human_decision="escalate_proposal",
+                    rewrites_used=0,
+                    max_rewrites=int(max_rewrites),
+                    materials_frozen_version=str(frozen_version or ""),
+                )
+            except Exception:
+                pass
             print("\n已触发变更提案：已暂停写作推进（请先处理提案并重新冻结材料包后再继续）。")
             return
 
@@ -2030,9 +2103,24 @@ def main():
                     "chapter": idx,
                     "decision": "waive",
                     "waived_issues_raw": sel,
+                    "rewrites_used": 0,
+                    "max_rewrites": int(max_rewrites),
+                    "materials_frozen_version": str(frozen_version or ""),
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 },
             )
+            try:
+                logger.event(
+                    "human_chapter_review",
+                    node="human_gate",
+                    chapter_index=int(idx),
+                    human_decision="waive",
+                    rewrites_used=0,
+                    max_rewrites=int(max_rewrites),
+                    materials_frozen_version=str(frozen_version or ""),
+                )
+            except Exception:
+                pass
             action = prompt_choice(
                 "已记录 waive。接下来请选择：",
                 choices={"a": "Accept", "r": "Request Rewrite", "q": "Quit"},
@@ -2046,6 +2134,34 @@ def main():
         rewrites_used = 0
         while action == "r":
             rewrites_used += 1
+            # 强门禁：达到上限后必须停机或升级提案（避免无限返工）
+            if max_rewrites > 0 and rewrites_used > max_rewrites:
+                stop_obj = {
+                    "chapter": idx,
+                    "decision": "stop_max_rewrites_exceeded",
+                    "rewrites_used": int(rewrites_used - 1),
+                    "max_rewrites": int(max_rewrites),
+                    "materials_frozen_version": str(frozen_version or ""),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                try:
+                    write_json(os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"), stop_obj)
+                except Exception:
+                    pass
+                try:
+                    logger.event(
+                        "human_chapter_review",
+                        node="human_gate",
+                        chapter_index=int(idx),
+                        human_decision="stop_max_rewrites_exceeded",
+                        rewrites_used=int(rewrites_used - 1),
+                        max_rewrites=int(max_rewrites),
+                        materials_frozen_version=str(frozen_version or ""),
+                    )
+                except Exception:
+                    pass
+                print("\n已达到最大返工次数：已暂停写作推进。建议：升级为变更提案(e)或调整写作策略后再继续。")
+                return
             instr = prompt_multiline("请输入本章重写指令单（用于 writer_agent；输入 . 结束）：", end_token=".")
             # 记录人审（request_rewrite）
             write_json(
@@ -2055,9 +2171,24 @@ def main():
                     "decision": "request_rewrite",
                     "required_fix": [x.strip() for x in instr.splitlines() if x.strip()],
                     "notes": instr,
+                    "rewrites_used": int(rewrites_used),
+                    "max_rewrites": int(max_rewrites),
+                    "materials_frozen_version": str(frozen_version or ""),
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 },
             )
+            try:
+                logger.event(
+                    "human_chapter_review",
+                    node="human_gate",
+                    chapter_index=int(idx),
+                    human_decision="request_rewrite",
+                    rewrites_used=int(rewrites_used),
+                    max_rewrites=int(max_rewrites),
+                    materials_frozen_version=str(frozen_version or ""),
+                )
+            except Exception:
+                pass
             # 保存当前版本快照
             try:
                 rw_dir = os.path.join(chapters_dir_current, f"{chap_id}.rewrites")
@@ -2092,46 +2223,110 @@ def main():
             action = prompt_choice(
                 "重写完成，是否通过？",
                 choices={"a": "Accept", "r": "继续重写", "q": "退出"},
-                default="a",
+                default=("a" if bool(args.yes) and str((final_state or {}).get("editor_decision", "") or "").strip() == "审核通过" else ("q" if bool(args.yes) else "a")),
             )
             if action == "q":
+                try:
+                    write_json(
+                        os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+                        {
+                            "chapter": idx,
+                            "decision": "quit",
+                            "rewrites_used": int(rewrites_used),
+                            "max_rewrites": int(max_rewrites),
+                            "created_at": datetime.now().isoformat(timespec="seconds"),
+                        },
+                    )
+                except Exception:
+                    pass
+                try:
+                    logger.event(
+                        "human_chapter_review",
+                        node="human_gate",
+                        chapter_index=int(idx),
+                        human_decision="quit",
+                        rewrites_used=int(rewrites_used),
+                        max_rewrites=int(max_rewrites),
+                        materials_frozen_version=str(frozen_version or ""),
+                    )
+                except Exception:
+                    pass
                 print("\n已退出：你可以基于 outputs/current 继续。")
                 return
 
         # action == "a"：总编通过，允许沉淀
+        # Accept 分级：你可能只接受“章节文本”，不接受其隐含设定/沉淀
+        accept_level = "text_only"
+        if bool(args.yes):
+            # 无人值守/回归测试：默认最保守，避免污染项目长期资产
+            accept_level = "text_only"
+        else:
+            lv = prompt_choice(
+                "请选择 Accept 层级（决定是否写入项目级 memory/建议）",
+                choices={
+                    "t": "仅接受正文（不生成/不写入 chapter_memory；不生成沉淀建议）",
+                    "m": "接受正文 + chapter_memory（写入 projects/<project>/memory/chapters）",
+                    "s": "接受正文 + chapter_memory + 沉淀建议（canon/materials update suggestions 仅落盘，不自动应用）",
+                },
+                default="m",
+            )
+            accept_level = {"t": "text_only", "m": "memory", "s": "suggestions"}.get(lv, "memory")
+
         write_json(
             os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
             {
                 "chapter": idx,
                 "decision": "accept",
+                "accept_level": accept_level,
+                "rewrites_used": int(rewrites_used),
+                "max_rewrites": int(max_rewrites),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             },
         )
+        try:
+            logger.event(
+                "human_chapter_review",
+                node="human_gate",
+                chapter_index=int(idx),
+                human_decision="accept",
+                human_accept_level=str(accept_level or ""),
+                rewrites_used=int(rewrites_used),
+                max_rewrites=int(max_rewrites),
+                materials_frozen_version=str(frozen_version or ""),
+            )
+        except Exception:
+            pass
         if final_state is None:
             continue
         final_state["human_decision"] = "accept"
         final_state["human_approved"] = True
 
-        # === 通过后才生成/落盘 memory 与沉淀建议 ===
-        try:
-            final_state = memory_agent(final_state)
-            final_state = canon_update_agent(final_state)
-            final_state = materials_update_agent(final_state)
-        except Exception:
-            pass
+        # === 通过后按层级生成/落盘 memory 与沉淀建议 ===
+        if accept_level in {"memory", "suggestions"}:
+            try:
+                final_state = memory_agent(final_state)
+            except Exception:
+                pass
+        if accept_level == "suggestions":
+            try:
+                final_state = canon_update_agent(final_state)
+                final_state = materials_update_agent(final_state)
+            except Exception:
+                pass
 
         mem = (final_state or {}).get("chapter_memory") or {}
-        if isinstance(mem, dict) and mem:
+        if accept_level in {"memory", "suggestions"} and isinstance(mem, dict) and mem:
             write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem)
             write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem)
 
         # suggestions（只落盘，后续仍走你已有的 apply-* 交互）
-        canon_update_suggestions = (final_state or {}).get("canon_update_suggestions") or []
-        materials_update_suggestions = (final_state or {}).get("materials_update_suggestions") or []
-        if isinstance(canon_update_suggestions, list) and canon_update_suggestions:
-            write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"), {"items": canon_update_suggestions})
-        if isinstance(materials_update_suggestions, list) and materials_update_suggestions:
-            write_json(os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"), {"items": materials_update_suggestions})
+        if accept_level == "suggestions":
+            canon_update_suggestions = (final_state or {}).get("canon_update_suggestions") or []
+            materials_update_suggestions = (final_state or {}).get("materials_update_suggestions") or []
+            if isinstance(canon_update_suggestions, list) and canon_update_suggestions:
+                write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"), {"items": canon_update_suggestions})
+            if isinstance(materials_update_suggestions, list) and materials_update_suggestions:
+                write_json(os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"), {"items": materials_update_suggestions})
 
         # 重要：每章必看模式下，默认不做无人值守自动应用（保持总编控制）
 

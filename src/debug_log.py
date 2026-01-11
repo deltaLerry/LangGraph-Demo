@@ -120,9 +120,21 @@ class RunLogger:
         for k in ("writer_version", "writer_chars", "planner_json_chars", "feedback_count", "canon_suggestions_count", "suggestions_count"):
             if k in obj:
                 idx[k] = obj.get(k)
+        # 人审门禁：保留决策与返工信息，便于实时查询“停机/返工/通过”状态
+        for k in (
+            "human_decision",
+            "human_accept_level",
+            "rewrites_used",
+            "max_rewrites",
+            "materials_frozen_version",
+        ):
+            if k in obj:
+                idx[k] = obj.get(k)
         # 顾问审计：保留短摘要与计数，便于实时过滤“高风险章节”
         for k in (
             "advisor_suggested_action",
+            "advisor_risk_level",
+            "advisor_blockers_count",
             "advisor_findings_count",
             "advisor_rewrite_count",
             "advisor_digest",

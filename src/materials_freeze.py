@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from storage import read_json, write_json, write_text
 from anchors import ensure_anchor_ids_and_build_index
+from materials_dod import validate_materials_pack_dod, dod_one_line
 
 
 def ensure_materials_pack_dirs(project_dir: str) -> Dict[str, str]:
@@ -219,6 +220,17 @@ def freeze_materials_pack(
     res = ensure_anchor_ids_and_build_index(obj)
     frozen_obj = res.get("frozen_pack") if isinstance(res.get("frozen_pack"), dict) else obj
     anchors_obj = res.get("anchors") if isinstance(res.get("anchors"), dict) else {"anchors": {}}
+
+    # 冻结 DoD 契约校验（硬门禁）：blocker/major 必须为 0
+    dod = validate_materials_pack_dod(frozen_obj)
+    dod_path = os.path.join(paths["digests"], f"dod_report.{frozen_version}.json")
+    try:
+        write_json(dod_path, dod)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    if not bool(dod.get("ok", False)):
+        # 不允许写入 frozen/index（避免产生“半冻结”状态）
+        raise ValueError(f"材料包 DoD 未通过，禁止冻结：{dod_one_line(dod)}（详情见 {dod_path}）")
 
     write_json(frozen_path, frozen_obj)
     anchors_path = os.path.join(paths["anchors"], f"anchors.{frozen_version}.json")
