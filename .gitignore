@@ -14,8 +14,8 @@ __pycache__/
 .env
 
 # output
-outputs/
-rewrites/
+outputs*/
+rewrites*/
 
 # output的生成文件
 test-idea.*

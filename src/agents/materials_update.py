@@ -66,7 +66,9 @@ def materials_update_agent(state: StoryState) -> StoryState:
     # 数据治理门禁（默认更安全）：仅在“审核通过”时产出 materials_update_suggestions。
     # 如你确实要在不通过时也产出建议，请在 state 中设置 allow_unapproved_updates=True。
     editor_decision = str(state.get("editor_decision", "") or "").strip()
-    approved = editor_decision == "审核通过"
+    # Human-in-the-loop：以总编验收为准（若未提供则回退到 editor_decision）
+    human_approved = state.get("human_approved", None)
+    approved = bool(human_approved) if human_approved is not None else (editor_decision == "审核通过")
     if (not approved) and (not bool(state.get("allow_unapproved_updates", False))):
         state["materials_update_used"] = False
         state["materials_update_suggestions"] = []

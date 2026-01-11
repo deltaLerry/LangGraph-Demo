@@ -541,7 +541,28 @@ def writer_agent(state: StoryState) -> StoryState:
         f"远处钟声响起，像是在宣告某个仪式的开始。"
         f"他不知道那是入门礼，还是审判。"
     )
-    state["writer_result"] = content.strip()
+    # 模板模式也遵守 target_words 区间，减少顾问/主编的无意义告警
+    target = int(state.get("target_words", 800) or 800)
+    min_ratio = float(state.get("writer_min_ratio", 0.75) or 0.75)
+    max_ratio = float(state.get("writer_max_ratio", 1.25) or 1.25)
+    min_chars = int(target * min_ratio)
+    max_chars = int(target * max_ratio)
+    out = content.strip()
+    if len(out) > max_chars:
+        out = out[:max(0, max_chars - 1)].rstrip() + "…"
+    if len(out) < min_chars:
+        # 轻量补齐：追加少量场景推进句，避免过短
+        pad = (
+            "\n\n他听见身后脚步声逼近，没人解释规则，只有目光在衡量他的价值。"
+            "\n他想开口，却发现每个问题都可能把自己推向更危险的位置。"
+            "\n钟声第二次响起时，他终于明白：这不是欢迎，而是筛选。"
+        )
+        while len(out) < min_chars:
+            out = (out + pad).strip()
+            if len(out) > max_chars:
+                out = out[:max(0, max_chars - 1)].rstrip() + "…"
+                break
+    state["writer_result"] = out
     state["writer_used_llm"] = False
     if logger:
         logger.event(

@@ -73,6 +73,8 @@ def _safe_serialize_messages(messages: Any, max_chars: int) -> Any:
 @dataclass
 class RunLogger:
     path: str
+    # 轻量索引日志（实时查询用）。为空则不写。
+    index_path: str = ""
     enabled: bool = True
     max_chars: int = 20000
     # jsonl 内联预览长度（超出则写入 debug_payloads/* 并在 jsonl 中仅保留 preview + 指针）
@@ -80,12 +82,59 @@ class RunLogger:
     payload_dirname: str = "debug_payloads"
     _seq: int = field(default=0, init=False, repr=False)
 
-    def _write(self, obj: Dict[str, Any]) -> None:
+    def _write_to_path(self, path: str, obj: Dict[str, Any]) -> None:
         if not self.enabled:
             return
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
+        if not path:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    def _write(self, obj: Dict[str, Any]) -> None:
+        self._write_to_path(self.path, obj)
+
+    def _write_index(self, obj: Dict[str, Any]) -> None:
+        """
+        写入轻量索引日志（可重建、适合实时过滤）。
+        只保留高价值字段与指针，不写入大字段。
+        """
+        if not self.index_path:
+            return
+        # 兼容：旧事件未必有这些字段，尽量“有则写、无则略”
+        keep_keys = (
+            "ts",
+            "event",
+            "node",
+            "name",
+            "chapter_index",
+            "duration_ms",
+            "skipped",
+            "reason",
+            "error_type",
+            "error",
+            "finish_reason",
+        )
+        idx = {k: obj.get(k) for k in keep_keys if k in obj}
+        # 常用：把少数计数类字段也保留（用于 dashboard/过滤）
+        for k in ("writer_version", "writer_chars", "planner_json_chars", "feedback_count", "canon_suggestions_count", "suggestions_count"):
+            if k in obj:
+                idx[k] = obj.get(k)
+        # 顾问审计：保留短摘要与计数，便于实时过滤“高风险章节”
+        for k in (
+            "advisor_suggested_action",
+            "advisor_findings_count",
+            "advisor_rewrite_count",
+            "advisor_digest",
+            "advisor_path",
+        ):
+            if k in obj:
+                idx[k] = obj.get(k)
+        # payload 指针（compact 过程会写入 *.__full_path / __chars）
+        for k in list(obj.keys()):
+            if k.endswith("__full_path") or k.endswith("__chars"):
+                idx[k] = obj.get(k)
+        self._write_to_path(self.index_path, idx)
 
     def _payload_dir(self) -> str:
         base = os.path.dirname(self.path)
@@ -208,6 +257,7 @@ class RunLogger:
         except Exception:
             pass
         self._write(obj)
+        self._write_index(obj)
 
     def span(self, name: str, **data: Any):
         return _Span(self, name=name, data=data)

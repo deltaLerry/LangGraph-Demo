@@ -117,6 +117,8 @@ def materials_pack_loop_agent(state: StoryState) -> StoryState:
     target_words = int(state.get("target_words", 800) or 800)
     user_style = str(state.get("style_override", "") or "").strip()
     paragraph_rules = str(state.get("paragraph_rules", "") or "").strip()
+    # Human-in-the-loop：总编对材料包的修改指令（用于驱动下一轮收敛）
+    human_requests = str(state.get("materials_human_requests", "") or "").strip()
     max_rounds = int(state.get("materials_pack_max_rounds", 2) or 2)
     min_decisions = int(state.get("materials_pack_min_decisions", 1) or 1)
     if max_rounds <= 0:
@@ -317,15 +319,16 @@ def materials_pack_loop_agent(state: StoryState) -> StoryState:
 
         common_ctx = (
             f"材料主编 issues：\n{truncate_text(json.dumps(issues_obj or [], ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
-            f"材料主编 suggested_decisions：\n{truncate_text(json.dumps(suggested_obj or [], ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
-            f"Arc结构（从细纲推断，务必对齐）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
-            "上游专家材料（事实/约束来源）：\n"
-            f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
-            f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
-            f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
-            f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
-            "当前 materials_pack（供你参考；在其基础上改好）：\n"
-            f"{truncate_text(json.dumps(base_pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
+            + f"材料主编 suggested_decisions：\n{truncate_text(json.dumps(suggested_obj or [], ensure_ascii=False, indent=2), max_chars=2200)}\n\n"
+            + f"Arc结构（从细纲推断，务必对齐）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
+            + (("总编修改指令（最高优先级，必须落实）：\n" + truncate_text(human_requests, max_chars=2200) + "\n\n") if human_requests else "")
+            + "上游专家材料（事实/约束来源）：\n"
+            + f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
+            + f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
+            + f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
+            + f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
+            + "当前 materials_pack（供你参考；在其基础上改好）：\n"
+            + f"{truncate_text(json.dumps(base_pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
         )
 
         out_pack = dict(base_pack)
@@ -381,17 +384,18 @@ def materials_pack_loop_agent(state: StoryState) -> StoryState:
         human_r = HumanMessage(
             content=(
                 f"规模：总章数={chapters_total}；每章≈{target_words}\n"
-                f"用户风格覆盖：{truncate_text(user_style, max_chars=800) or '（无）'}\n"
-                f"段落/结构规则：{truncate_text(paragraph_rules, max_chars=800) or '（无）'}\n\n"
-                f"Arc结构（从细纲推断）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
-                f"静态扫描发现（可作为证据）：\n{truncate_text(json.dumps(static_findings, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
-                "上游专家材料（事实/约束来源）：\n"
-                f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
-                f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
-                f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
-                f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
-                "当前 materials_pack（需要你审稿）：\n"
-                f"{truncate_text(json.dumps(pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
+                + f"用户风格覆盖：{truncate_text(user_style, max_chars=800) or '（无）'}\n"
+                + f"段落/结构规则：{truncate_text(paragraph_rules, max_chars=800) or '（无）'}\n\n"
+                + f"Arc结构（从细纲推断）：\n{truncate_text(json.dumps(arcs_hint, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
+                + f"静态扫描发现（可作为证据）：\n{truncate_text(json.dumps(static_findings, ensure_ascii=False, indent=2), max_chars=1600)}\n\n"
+                + (("【总编修改指令（必须优先满足）】\n" + truncate_text(human_requests, max_chars=2000) + "\n\n") if human_requests else "")
+                + "上游专家材料（事实/约束来源）：\n"
+                + f"- world: {truncate_text(json.dumps(world, ensure_ascii=False), max_chars=1200)}\n"
+                + f"- characters: {truncate_text(json.dumps(characters, ensure_ascii=False), max_chars=1200)}\n"
+                + f"- outline(main_arc/themes): {truncate_text(json.dumps({'main_arc': outline.get('main_arc',''), 'themes': outline.get('themes',[])}, ensure_ascii=False), max_chars=800)}\n"
+                + f"- tone: {truncate_text(json.dumps(tone, ensure_ascii=False), max_chars=1200)}\n\n"
+                + "当前 materials_pack（需要你审稿）：\n"
+                + f"{truncate_text(json.dumps(pack, ensure_ascii=False, indent=2), max_chars=4000)}\n"
             )
         )
         review, _raw, _fr, _usage = invoke_json_with_repair(

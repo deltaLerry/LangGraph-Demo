@@ -31,7 +31,12 @@ def memory_agent(state: StoryState) -> StoryState:
         logger.event("node_start", node="memory", chapter_index=chapter_index)
 
     decision = str(state.get("editor_decision", "") or "").strip()
-    approved = decision == "审核通过"
+    # Human-in-the-loop：以总编验收为准（若未提供则回退到 editor_decision）
+    human_approved = state.get("human_approved", None)
+    if human_approved is None:
+        approved = decision == "审核通过"
+    else:
+        approved = bool(human_approved)
 
     planner_result = state.get("planner_result") or {}
     writer_result = str(state.get("writer_result", "") or "")
@@ -132,6 +137,7 @@ def memory_agent(state: StoryState) -> StoryState:
         mem["chapter_index"] = chapter_index
         # 额外元信息（非 LLM 生成字段）：用于后续区分“通过/不通过”的记忆来源
         mem["editor_decision"] = decision
+        mem["human_decision"] = str(state.get("human_decision", "") or "")
         mem["approved"] = approved
         state["chapter_memory"] = mem
         state["memory_used_llm"] = True
@@ -166,6 +172,7 @@ def memory_agent(state: StoryState) -> StoryState:
     mem = {
         "chapter_index": chapter_index,
         "editor_decision": decision,
+        "human_decision": str(state.get("human_decision", "") or ""),
         "approved": approved,
         "summary": (writer_result[:180] + "…") if len(writer_result) > 180 else writer_result,
         "events": [

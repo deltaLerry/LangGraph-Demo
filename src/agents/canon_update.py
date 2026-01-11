@@ -43,7 +43,9 @@ def canon_update_agent(state: StoryState) -> StoryState:
     # 生成建议（统一复用 apply_canon_suggestions 支持的最保守 op：note / append）
     suggestions: List[Dict[str, Any]] = []
     editor_decision = str(state.get("editor_decision", "") or "").strip()
-    approved = editor_decision == "审核通过"
+    # Human-in-the-loop：以总编验收为准（若未提供则回退到 editor_decision）
+    human_approved = state.get("human_approved", None)
+    approved = bool(human_approved) if human_approved is not None else (editor_decision == "审核通过")
     if (not approved) and (not bool(state.get("allow_unapproved_updates", False))):
         state["canon_update_used"] = False
         state["canon_update_suggestions"] = []

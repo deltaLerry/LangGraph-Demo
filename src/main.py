@@ -21,6 +21,7 @@ from storage import (
     get_max_chapter_memory_index,
     make_current_dir,
     load_materials_bundle,
+    load_canon_bundle,
     preview_materials_suggestions,
     preview_canon_suggestions,
     read_canon_suggestions_from_dir,
@@ -38,6 +39,30 @@ from agents.tone import tone_agent
 from agents.materials_aggregator import materials_aggregator_agent
 from agents.materials_pack_loop import materials_pack_loop_agent
 from agents.materials_init import materials_init_agent
+from materials_freeze import (
+    create_materials_pack_draft,
+    freeze_materials_pack,
+    load_current_frozen_materials_pack,
+    snapshot_frozen_to_run,
+    frozen_pack_to_materials_bundle,
+    count_open_question_blockers,
+)
+from human_cli import (
+    prompt_choice,
+    prompt_multiline,
+    print_json_preview,
+    print_chapter_review_card,
+    print_materials_review_card,
+)
+from change_proposals import create_change_proposal_skeleton
+from change_proposals import (
+    write_advisor_review,
+    write_human_decision,
+    append_migration_log,
+    create_refreeze_draft_from_current_frozen,
+    finalize_refreeze_from_draft,
+)
+from advisor import advisor_digest_line, build_advisor_report
 from settings import load_settings
 from workflow import build_chapter_app
 from debug_log import RunLogger, load_events, build_call_graph_mermaid_by_chapter
@@ -128,6 +153,7 @@ def main():
     parser.add_argument("--yes", action="store_true", help="跳过所有确认（危险：会直接应用/归档）。适合自动化")
     parser.add_argument("--llm-mode", type=str, default="", help="运行模式：template / llm / auto（覆盖配置）")
     parser.add_argument("--debug", action="store_true", help="开启debug日志（写入debug.jsonl与call_graph.md）")
+    parser.add_argument("--advisor", action="store_true", help="启用顾问审计：每章生成 chapters/XXX.advisor.json（规则化一致性检查，不自动猜 anchors）")
     # 重申：对 outputs/current 的既有章节做“同等要求”的审稿+改写（逐章）
     parser.add_argument(
         "--restate",
@@ -138,6 +164,20 @@ def main():
     parser.add_argument("--restate-start", type=int, default=None, help="重申：只处理从该章开始（含）")
     parser.add_argument("--restate-end", type=int, default=None, help="重申：只处理到该章结束（含）")
     parser.add_argument("--rewrite-file", type=str, default="", help="重写/重申：用户额外指导意见文件（UTF-8），注入 writer/editor")
+    parser.add_argument(
+        "--materials-only",
+        action="store_true",
+        help="只运行材料包阶段并进入冻结门禁（不进入章节写作）。用于总编先把材料包打磨冻结。",
+    )
+    # 变更提案（项目级操作，不进入生成流程）
+    parser.add_argument("--proposal-id", type=str, default="", help="变更提案ID（例如 CP-20260108-0001）。需配合 --project 使用。")
+    parser.add_argument("--proposal-advisor-review", action="store_true", help="顾问审：写入 changes/proposals/<id>/advisor_review.json")
+    parser.add_argument("--proposal-approve", action="store_true", help="总编审批通过：写入 changes/proposals/<id>/human_decision.json")
+    parser.add_argument("--proposal-reject", action="store_true", help="总编驳回：写入 changes/proposals/<id>/human_decision.json")
+    parser.add_argument("--proposal-migration-log", action="store_true", help="追加一条迁移日志到 migration_log.json")
+    parser.add_argument("--proposal-create-draft", action="store_true", help="从当前 frozen 生成一个可编辑 draft，并回填 proposal.refreeze.draft_version")
+    parser.add_argument("--proposal-refreeze", action="store_true", help="将指定 draft 冻结为新 frozen（需 --proposal-draft-version）")
+    parser.add_argument("--proposal-draft-version", type=str, default="", help="提案 refreeze 指定的 draft 版本（例如 v003）")
     args = parser.parse_args()
 
     # 统一相对路径解析基准：
@@ -258,6 +298,221 @@ def main():
         return ans in ("y", "yes", "是", "确认")
 
     # ============================
+    # 变更提案 CLI（项目级操作）
+    # ============================
+    if args.proposal_id and (
+        args.proposal_advisor_review
+        or args.proposal_approve
+        or args.proposal_reject
+        or args.proposal_migration_log
+        or args.proposal_create_draft
+        or args.proposal_refreeze
+    ):
+        if not args.project.strip():
+            raise ValueError("变更提案操作必须指定 --project（用于定位 projects/<project>/changes）")
+        project_dir = get_project_dir(output_base, args.project.strip())
+        pid = str(args.proposal_id or "").strip()
+
+        if args.proposal_advisor_review:
+            notes = prompt_multiline("请输入顾问审意见（风险/影响面/迁移雷区；输入 . 结束）：", end_token=".")
+            path = write_advisor_review(project_dir, pid, notes=notes, status="reviewed")
+            print(f"\n已写入顾问审：{path}")
+            return
+
+        if args.proposal_approve or args.proposal_reject:
+            decision = "approve" if bool(args.proposal_approve) else "reject"
+            notes = prompt_multiline(f"请输入总编{('通过' if decision=='approve' else '驳回')}说明（输入 . 结束）：", end_token=".")
+            path = write_human_decision(project_dir, pid, decision=decision, notes=notes)
+            print(f"\n已写入总编决策：{path}")
+            return
+
+        if args.proposal_migration_log:
+            line = prompt_multiline("请输入迁移日志（一段即可；输入 . 结束）：", end_token=".")
+            path = append_migration_log(project_dir, pid, line=line)
+            print(f"\n已追加迁移日志：{path}")
+            return
+
+        if args.proposal_create_draft:
+            res = create_refreeze_draft_from_current_frozen(project_dir, pid)
+            print("\n=== 已生成 refreeze draft（请手工编辑该 JSON 完成迁移）===")
+            print(f"- base_frozen_version：{res.get('base_frozen_version')}")
+            print(f"- draft_version：{res.get('draft_version')}")
+            print(f"- draft_path：{res.get('draft_path')}")
+            print("\n编辑完成后执行：")
+            print(f"  python src/main.py --project \"{args.project}\" --proposal-id \"{pid}\" --proposal-refreeze --proposal-draft-version \"{res.get('draft_version')}\"")
+            return
+
+        if args.proposal_refreeze:
+            dv = str(args.proposal_draft_version or "").strip()
+            if not dv:
+                raise ValueError("--proposal-refreeze 需要 --proposal-draft-version（例如 v003）")
+            notes = prompt_multiline("（可选）再冻结备注（输入 . 结束）：", end_token=".")
+            out = finalize_refreeze_from_draft(project_dir, pid, draft_version=dv, human_notes=notes)
+            print("\n=== 再冻结完成 ===")
+            print(f"- new_frozen_version：{out.get('new_frozen_version')}")
+            print(f"- frozen_path：{out.get('frozen_path')}")
+            print(f"- anchors_path：{out.get('anchors_path')}")
+            return
+
+    def _human_gate_materials(*, project_dir: str, planned_state: StoryState) -> tuple[bool, str, dict, dict]:
+        """
+        材料包门禁（总编必审）：
+        - 写入 drafts/materials_pack.vNNN.json
+        - 总编选择 freeze / request_changes / quit
+        返回：(frozen_ok, frozen_version, frozen_obj, anchors_obj)
+        """
+        # 绑定总编指令（若上次留下了材料包指令，可手动复用：从当前 output_dir 读取 materials_change_requests.txt）
+        mb = planned_state.get("materials_bundle") if isinstance(planned_state.get("materials_bundle"), dict) else {}
+        canon_bundle = {}
+        try:
+            canon_bundle = load_canon_bundle(project_dir)
+        except Exception:
+            canon_bundle = {"world": {}, "characters": {}, "timeline": {}, "style": ""}
+
+        # 产出一个 draft 版本（项目级）
+        settings_meta = {
+            "target_words": int(planned_state.get("target_words", settings.gen.target_words) or settings.gen.target_words),
+            "writer_min_ratio": float(getattr(settings, "writer_min_ratio", 0.7)),
+            "writer_max_ratio": float(getattr(settings, "writer_max_ratio", 1.5)),
+            "style_override": str(planned_state.get("style_override", "") or ""),
+            "paragraph_rules": str(planned_state.get("paragraph_rules", "") or ""),
+        }
+        ver, draft_path = create_materials_pack_draft(
+            project_dir=project_dir,
+            materials_bundle=mb if isinstance(mb, dict) else {},
+            canon_bundle=canon_bundle if isinstance(canon_bundle, dict) else {},
+            settings_meta=settings_meta,
+            agent_review=planned_state.get("materials_pack_loop_last_review") if isinstance(planned_state.get("materials_pack_loop_last_review"), dict) else None,
+        )
+
+        print("\n=== 材料包门禁（总编必审）===")
+        print(f"- draft 已写入：{draft_path}")
+        print("- 建议先查看 draft（含 canon/planning/execution/risk 四层）再决定是否冻结。")
+        try:
+            obj = read_json(draft_path) or {}
+        except Exception:
+            obj = {}
+        # 默认打印 digest 审阅卡（更适合“每次都要审”的节奏）
+        try:
+            cur_ver, _fobj, _aobj = load_current_frozen_materials_pack(project_dir)
+        except Exception:
+            cur_ver = ""
+        if obj:
+            try:
+                print_materials_review_card(
+                    draft_obj=obj,
+                    draft_path=draft_path,
+                    project_dir=project_dir,
+                    current_frozen_version=str(cur_ver or ""),
+                )
+            except Exception:
+                print("\n--- draft 预览（截断）---")
+                print_json_preview(obj, max_chars=3500)
+
+        while True:
+            action = prompt_choice(
+                "请选择动作",
+                choices={
+                    "f": "冻结通过（生成 materials_pack.frozen.vNNN + anchors.vNNN，打开写作门禁）",
+                    "r": "退回修改（写入总编指令单，后续重新跑材料包收敛）",
+                    "v": "查看 draft 全文 JSON（materials_pack.vNNN.json）",
+                    "d": "重新显示 digest",
+                    "q": "退出（不冻结，不进入写作）",
+                },
+                # 默认强人审；--yes 用于自动化/回归测试（明确跳过门禁交互）
+                default=("f" if bool(args.yes) else "q"),
+            )
+            if action == "v":
+                print("\n--- draft 全文 JSON ---")
+                print_json_preview(obj, max_chars=20000)
+                continue
+            if action == "d":
+                try:
+                    print_materials_review_card(
+                        draft_obj=obj,
+                        draft_path=draft_path,
+                        project_dir=project_dir,
+                        current_frozen_version=str(cur_ver or ""),
+                    )
+                except Exception:
+                    pass
+                continue
+            break
+        if action == "q":
+            return False, "", {}, {}
+        if action == "r":
+            req = prompt_multiline("请输入材料包修改指令单（尽量具体，可引用 DEC/CON/GLO/…；用于驱动下一轮收敛）：", end_token=".")
+            # 写入总编人审记录（项目级）
+            human_review = {
+                "version": ver,
+                "decision": "request_changes",
+                "notes": req,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            # 记录到 reviews/human_review.vNNN.json
+            ensure_materials_files(project_dir)  # 保底
+            # 同时把指令放回 state，便于本次 run 的后续节点（若继续跑）使用
+            planned_state["materials_human_requests"] = req
+            # 直接把人审记录落盘到 project materials/reviews（与 freeze 逻辑一致）
+            try:
+                from materials_freeze import ensure_materials_pack_dirs
+
+                p = ensure_materials_pack_dirs(project_dir)
+                write_json(os.path.join(p["reviews"], f"human_review.{ver}.json"), human_review)
+            except Exception:
+                pass
+            print("\n已记录修改指令。请重新运行一次材料包阶段以收敛后再冻结。")
+            return False, "", {}, {}
+
+        # action == "f"
+        # 冻结前 DoD 门禁：blocker open_questions 必须为 0
+        try:
+            blockers, picked = count_open_question_blockers(obj if isinstance(obj, dict) else {})
+        except Exception:
+            blockers, picked = 0, []
+        if blockers > 0:
+            print("\n材料包存在 blocker open_questions，禁止冻结。请先回答/降级这些问题：")
+            for i, it in enumerate(picked[:10], start=1):
+                q = str(it.get("question", "") or it.get("q", "") or it.get("topic", "") or "").strip()
+                impact = str(it.get("impact", "") or "").strip()
+                print(f"- [{i}] {q or '（未命名问题）'}")
+                if impact:
+                    print(f"    impact: {impact[:200]}")
+            human_review = {
+                "version": ver,
+                "decision": "request_changes",
+                "notes": "DoD阻塞：存在 blocker open_questions，已拒绝冻结。请先补齐/降级后再冻结。",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                from materials_freeze import ensure_materials_pack_dirs
+
+                p = ensure_materials_pack_dirs(project_dir)
+                write_json(os.path.join(p["reviews"], f"human_review.{ver}.json"), human_review)
+            except Exception:
+                pass
+            return False, "", {}, {}
+
+        human_notes = prompt_multiline("（可选）冻结备注（直接回车然后输入 . 结束）：", end_token=".")
+        human_review = {
+            "version": ver,
+            "decision": "approve_and_freeze",
+            "notes": human_notes,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        frozen_version, frozen_path, anchors_path = freeze_materials_pack(
+            project_dir=project_dir,
+            draft_version=ver,
+            draft_obj=obj,
+            human_review=human_review,
+        )
+        print("\n=== 冻结完成 ===")
+        print(f"- frozen：{frozen_path}")
+        print(f"- anchors：{anchors_path}")
+        ver2, frozen_obj, anchors_obj = load_current_frozen_materials_pack(project_dir)
+        return True, ver2, frozen_obj, anchors_obj
+
+    # ============================
     # 重申模式：复审 + 改写 outputs/current
     # ============================
     if args.restate:
@@ -357,11 +612,14 @@ def main():
         llm = None
         force_llm = settings.llm_mode == "llm"
         try:
-            # 重申日志单独落盘，避免污染原 debug.jsonl
+            # 重申日志单独落盘：full + index（便于实时过滤/查询）
+            restate_logs_dir = os.path.join(current_dir, "logs")
             logger = RunLogger(
-                path=os.path.join(current_dir, "restate_debug.jsonl"),
+                path=os.path.join(restate_logs_dir, "restate.events.full.jsonl"),
+                index_path=os.path.join(restate_logs_dir, "restate.events.index.jsonl"),
                 enabled=bool(settings.debug),
                 preview_chars=int(getattr(settings, "debug_preview_chars", 100) or 100),
+                payload_dirname="payloads",
             )
             with logger.span("llm_init", llm_mode=settings.llm_mode):
                 if settings.llm_mode == "template":
@@ -489,7 +747,6 @@ def main():
         from agents.memory import memory_agent
         from agents.canon_update import canon_update_agent
         from agents.materials_update import materials_update_agent
-        from agents.screenwriter import screenwriter_agent
 
         chapter_app = build_chapter_app()
 
@@ -1138,10 +1395,13 @@ def main():
     current_dir = make_current_dir(output_base)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 
+    logs_dir = os.path.join(current_dir, "logs")
     logger = RunLogger(
-        path=os.path.join(current_dir, "debug.jsonl"),
+        path=os.path.join(logs_dir, "events.full.jsonl"),
+        index_path=os.path.join(logs_dir, "events.index.jsonl"),
         enabled=bool(settings.debug),
         preview_chars=int(getattr(settings, "debug_preview_chars", 100) or 100),
+        payload_dirname="payloads",
     )
     logger.event(
         "run_start",
@@ -1282,6 +1542,38 @@ def main():
     # 阶段3：materials_init（同步会议）——仅在项目 materials 为空/占位时初始化（受 Canon 硬约束）
     planned_state = materials_init_agent(planned_state)
 
+    # ============================
+    # 材料包冻结门禁（写作前必须）
+    # ============================
+    frozen_ok = False
+    frozen_version = ""
+    frozen_obj: dict = {}
+    anchors_obj: dict = {}
+    # 若项目已有冻结材料包，可直接复用；否则进入总编门禁
+    try:
+        frozen_version, frozen_obj, anchors_obj = load_current_frozen_materials_pack(project_dir)
+        frozen_ok = bool(frozen_version and isinstance(frozen_obj, dict) and frozen_obj)
+    except Exception:
+        frozen_ok = False
+
+    if not frozen_ok:
+        frozen_ok, frozen_version, frozen_obj, anchors_obj = _human_gate_materials(project_dir=project_dir, planned_state=planned_state)
+        if not frozen_ok:
+            print("\n材料包未冻结：已停止（未进入章节写作）。")
+            return
+
+    # 将冻结材料包快照到本次 run 目录（追溯）
+    try:
+        snapshot_frozen_to_run(current_dir, frozen_version=frozen_version, frozen_obj=frozen_obj, anchors_obj=anchors_obj)
+    except Exception:
+        pass
+
+    # 写作/审稿注入：以冻结材料包转换后的 bundle 为准（强一致性口径）
+    try:
+        planned_state["materials_bundle"] = frozen_pack_to_materials_bundle(frozen_obj, idea=str(settings.idea or ""))
+    except Exception:
+        pass
+
     # 持久化项目元信息（用于 resume）
     write_json(
         os.path.join(project_dir, "project_meta.json"),
@@ -1341,10 +1633,25 @@ def main():
             "arc_every_n": int(settings.arc_every_n),
             "arc_recent_k": int(settings.arc_recent_k),
             "auto_apply_updates": str(settings.auto_apply_updates or "off"),
+            "materials_frozen_version": str(frozen_version or ""),
         },
     )
 
-    chapter_app = build_chapter_app()
+    # materials-only：总编先冻结材料包，不进入章节写作
+    if bool(args.materials_only):
+        print("\n已完成材料包冻结门禁（materials-only）。")
+        print(f"- 项目：{project_dir}")
+        print(f"- frozen_version：{frozen_version}")
+        print(f"- 会话目录：{current_dir}")
+        return
+
+    # Human-in-the-loop：章节不再自动返工/自动沉淀，改为每章“写手+主编”后暂停等总编决策
+    from agents.writer import writer_agent
+    from agents.editor import editor_agent
+    from agents.memory import memory_agent
+    from agents.canon_update import canon_update_agent
+    from agents.materials_update import materials_update_agent
+
     last_state: StoryState = planned_state
 
     chapters_dir_current = os.path.join(current_dir, "chapters")
@@ -1453,9 +1760,12 @@ def main():
         }
         logger.event("chapter_start", chapter_index=idx)
         chap_id = f"{idx:03d}"
+        # === 章节：写手 + 主编（不自动返工） ===
         final_state: StoryState | None = None
         try:
-            final_state = chapter_app.invoke(chapter_state, config={"recursion_limit": 50})
+            st = writer_agent(dict(chapter_state))
+            st = editor_agent(st)
+            final_state = st
             last_state = final_state
         except Exception as e:
             # 关键稳定性：单章失败不拖死整次批量生成
@@ -1536,83 +1846,294 @@ def main():
                 {"items": materials_update_suggestions},
             )
 
-        # chapter memory：写入 current + 持久化 projects
-        mem = (final_state or {}).get("chapter_memory") or {}
-        if isinstance(mem, dict) and mem:
-            write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem)
-            # 持久化：项目的 chapter memories
-            write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem)
-
-        # === 无人值守：安全自动应用沉淀建议（让后续章节立即受益） ===
-        try:
-            mode = str(settings.auto_apply_updates or "off").strip().lower()
-            if mode == "safe":
-                # 1) materials_patch（安全幂等追加）——直接应用到 projects/<project>/materials
-                mats_items: list[dict] = []
-                if isinstance(materials_update_suggestions, list):
-                    for it in materials_update_suggestions:
-                        if not isinstance(it, dict):
-                            continue
-                        act = str(it.get("action", "") or "").strip()
-                        if act == "materials_patch":
-                            mats_items.append(it)
-                mats_stats = {"applied": 0, "skipped": 0, "backups": []}
-                if mats_items:
-                    mats_stats = apply_materials_suggestions(project_dir=project_dir, items=mats_items, yes=True, dry_run=False)
-
-                # 2) canon_patch（严格白名单：只允许 world.notes / style.md 追加）
-                canon_items_all: list[dict] = []
-                for arr in (canon_suggestions, canon_update_suggestions, materials_update_suggestions):
-                    if isinstance(arr, list):
-                        for it in arr:
-                            if isinstance(it, dict):
-                                canon_items_all.append(it)
-
-                def _is_safe_canon_patch(it: dict) -> bool:
-                    act = str(it.get("action", "") or "").strip()
-                    if act != "canon_patch":
-                        return False
-                    cp = it.get("canon_patch") if isinstance(it.get("canon_patch"), dict) else {}
-                    target = str(cp.get("target", "") or "").strip()
-                    op = str(cp.get("op", "") or "").strip()
-                    path = str(cp.get("path", "") or "").strip()
-                    if target == "world.json" and op == "note" and (path in ("notes", "")):
-                        return True
-                    if target == "style.md" and op == "append":
-                        return True
-                    return False
-
-                canon_items = [it for it in canon_items_all if _is_safe_canon_patch(it)]
-                canon_stats = {"applied": 0, "skipped": 0, "backups": []}
-                if canon_items:
-                    canon_stats = apply_canon_suggestions(project_dir=project_dir, items=canon_items, yes=True, dry_run=False)
-
-                write_json(
-                    os.path.join(chapters_dir_current, f"{chap_id}.auto_apply.json"),
-                    {
-                        "mode": mode,
-                        "materials": {"items": len(mats_items), "stats": mats_stats},
-                        "canon": {"items": len(canon_items), "stats": canon_stats},
-                    },
+        # === 顾问审计（可选） ===
+        advisor_path = ""
+        advisor_report: dict = {}
+        if bool(args.advisor) and isinstance(frozen_obj, dict) and frozen_obj:
+            try:
+                advisor_report = build_advisor_report(
+                    chapter_text=str((final_state or {}).get("writer_result", "") or ""),
+                    editor_report=(final_state or {}).get("editor_report"),
+                    frozen_pack=frozen_obj,
+                    anchors_index=(anchors_obj if isinstance(anchors_obj, dict) else None),
                 )
+                advisor_path = os.path.join(chapters_dir_current, f"{chap_id}.advisor.json")
+                write_json(advisor_path, advisor_report)  # type: ignore[arg-type]
                 try:
+                    findings0 = advisor_report.get("findings") if isinstance(advisor_report, dict) else []
+                    findings_list = findings0 if isinstance(findings0, list) else []
+                    rewrite_count = sum(
+                        1 for it in findings_list if isinstance(it, dict) and str(it.get("suggest", "") or "") == "rewrite"
+                    )
+                    digest = str(advisor_report.get("digest", "") or "").strip() or advisor_digest_line(advisor_report)
+                    rel_path = os.path.relpath(advisor_path, current_dir).replace("\\", "/")
                     logger.event(
-                        "auto_apply_updates",
-                        chapter_index=idx,
-                        mode=mode,
-                        materials_items=len(mats_items),
-                        canon_items=len(canon_items),
-                        materials_applied=int(mats_stats.get("applied", 0) or 0),
-                        canon_applied=int(canon_stats.get("applied", 0) or 0),
+                        "advisor_audit",
+                        node="advisor",
+                        chapter_index=int(idx),
+                        advisor_suggested_action=str(advisor_report.get("suggested_action", "") or "").strip(),
+                        advisor_findings_count=len(findings_list),
+                        advisor_rewrite_count=int(rewrite_count),
+                        advisor_digest=digest,
+                        advisor_path=rel_path,
                     )
                 except Exception:
                     pass
-        except Exception as e:
-            # 自动应用失败不阻断批量生成
+            except Exception:
+                advisor_path = ""
+                advisor_report = {}
+
+        # === 总编人审门禁（每章必看） ===
+        md_path = os.path.join(chapters_dir_current, f"{chap_id}.md")
+        editor_json_path = os.path.join(chapters_dir_current, f"{chap_id}.editor.json")
+        snapshot_dir = os.path.join(current_dir, "materials_snapshot")
+        # 打印 digest 审阅卡
+        try:
+            print_chapter_review_card(
+                chapter_index=int(idx),
+                chap_id=str(chap_id),
+                chapter_text=str((final_state or {}).get("writer_result", "") or ""),
+                editor_report=(final_state or {}).get("editor_report"),
+                materials_frozen_version=str(frozen_version or ""),
+                chapter_md_path=md_path,
+                editor_json_path=editor_json_path,
+                snapshot_dir=snapshot_dir if os.path.exists(snapshot_dir) else "",
+                extra_paths={"顾问报告": advisor_path} if advisor_path else {},
+                advisor_digest=advisor_digest_line(advisor_report) if advisor_report else "",
+            )
+        except Exception:
+            pass
+
+        # 交互：允许先查看全文/JSON，再做决策
+        while True:
+            action = prompt_choice(
+                "请选择动作",
+                choices={
+                    "a": "Accept：通过本章（允许沉淀 memory/建议）并进入下一章",
+                    "r": "Request Rewrite：给重写指令单，进入下一轮写手+主编",
+                    "w": "Waive：认为部分 issues 不成立/不必改（记录原因），然后你仍需 Accept 或继续 Rewrite",
+                    "e": "Escalate：触发变更提案（冻结材料/Canon 需要调整），暂停写作并落盘提案请求",
+                    "f": "查看全文（chapters/XXX.md）",
+                    "j": "查看完整审稿JSON（chapters/XXX.editor.json）",
+                    "k": "查看顾问报告JSON（chapters/XXX.advisor.json）",
+                    "d": "重新显示 digest",
+                    "q": "Quit：退出（保留已产出文件；下次可继续）",
+                },
+                # 默认强人审；--yes 用于自动化/回归测试（明确跳过门禁交互）
+                default=("a" if bool(args.yes) else "q"),
+            )
+            if action == "f":
+                print("\n--- 全文（md）---")
+                print(str((final_state or {}).get("writer_result", "") or ""))
+                continue
+            if action == "j":
+                print("\n--- 完整审稿JSON（editor_report）---")
+                print_json_preview((final_state or {}).get("editor_report") or {}, max_chars=12000)
+                continue
+            if action == "k":
+                if advisor_report:
+                    print("\n--- 顾问报告（advisor_report）---")
+                    print_json_preview(advisor_report, max_chars=12000)
+                elif advisor_path and os.path.exists(advisor_path):
+                    print("\n--- 顾问报告文件路径 ---")
+                    print(advisor_path)
+                else:
+                    print("\n（本章未生成顾问报告；可使用 --advisor 启用）")
+                continue
+            if action == "d":
+                try:
+                    print_chapter_review_card(
+                        chapter_index=int(idx),
+                        chap_id=str(chap_id),
+                        chapter_text=str((final_state or {}).get("writer_result", "") or ""),
+                        editor_report=(final_state or {}).get("editor_report"),
+                        materials_frozen_version=str(frozen_version or ""),
+                        chapter_md_path=md_path,
+                        editor_json_path=editor_json_path,
+                        snapshot_dir=snapshot_dir if os.path.exists(snapshot_dir) else "",
+                        extra_paths={"顾问报告": advisor_path} if advisor_path else {},
+                        advisor_digest=advisor_digest_line(advisor_report) if advisor_report else "",
+                    )
+                except Exception:
+                    pass
+                continue
+            break
+
+        if action == "q":
+            print("\n已退出：你可以基于 outputs/current 继续。")
+            return
+
+        if action == "e":
+            # 最小可用：先落盘“提案触发请求”，并停止后续章节推进（后续再实现完整提案FSM）
+            reason = prompt_multiline("请输入触发变更提案的原因与影响面（引用冲突点/材料锚点更佳；输入 . 结束）：", end_token=".")
+            anchors_raw = prompt_multiline(
+                "请输入关联的 anchors（手工填写，不自动猜；可用空格/逗号/换行分隔；输入 . 结束）：",
+                end_token=".",
+            )
+            anchors: list[str] = []
+            for part in str(anchors_raw or "").replace(",", " ").replace("，", " ").replace("；", " ").replace(";", " ").split():
+                p = part.strip()
+                if p and (p not in anchors):
+                    anchors.append(p)
+            req_obj = {
+                "chapter": idx,
+                "decision": "escalate_proposal",
+                "reason": reason,
+                "anchors": anchors,
+                "materials_frozen_version": str(frozen_version or ""),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.change_proposal_request.json"), req_obj)
+            # 项目级提案目录骨架（CP-YYYYMMDD-NNNN）
             try:
-                logger.event("auto_apply_error", chapter_index=idx, error_type=e.__class__.__name__, error=str(e))
+                created = create_change_proposal_skeleton(
+                    project_dir=project_dir,
+                    chapter_index=int(idx),
+                    materials_frozen_version=str(frozen_version or ""),
+                    reason=str(reason or ""),
+                    anchors=anchors,
+                    extra={"run_id": str(run_id or ""), "output_dir": str(current_dir or "")},
+                )
+                write_json(os.path.join(chapters_dir_current, f"{chap_id}.change_proposal_created.json"), created)
+                print("\n=== 已创建变更提案目录 ===")
+                print(f"- proposal_id：{created.get('proposal_id')}")
+                print(f"- dir：{created.get('dir')}")
+            except Exception as e:
+                print(f"\n（提案目录创建失败：{e}；已保留章节请求文件，稍后可手动创建提案目录）")
+            write_json(
+                os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+                {
+                    "chapter": idx,
+                    "decision": "escalate_proposal",
+                    "notes": reason,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            print("\n已触发变更提案：已暂停写作推进（请先处理提案并重新冻结材料包后再继续）。")
+            return
+
+        if action == "w":
+            # Waive：记录你认为不必改的 issues（按序号），然后你仍需选择 Accept 或 Rewrite
+            rep = (final_state or {}).get("editor_report") if isinstance((final_state or {}).get("editor_report"), dict) else {}
+            issues0 = rep.get("issues") if isinstance(rep.get("issues"), list) else []
+            print("\n--- 主编 issues（供选择 waive）---")
+            for i, it in enumerate(issues0, start=1):
+                if not isinstance(it, dict):
+                    continue
+                t = str(it.get("type", "") or "").strip() or "N/A"
+                issue = str(it.get("issue", "") or "").strip()
+                print(f"[{i}] ({t}) {issue[:120]}")
+            sel = prompt_multiline("请输入要 waive 的 issue 序号（可多行），以及原因（可写在最后几行）；输入 . 结束：", end_token=".")
+            write_json(
+                os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+                {
+                    "chapter": idx,
+                    "decision": "waive",
+                    "waived_issues_raw": sel,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            action = prompt_choice(
+                "已记录 waive。接下来请选择：",
+                choices={"a": "Accept", "r": "Request Rewrite", "q": "Quit"},
+                default=("a" if bool(args.yes) else "a"),
+            )
+            if action == "q":
+                print("\n已退出：你可以基于 outputs/current 继续。")
+                return
+
+        # 重写回路（由人驱动，不再自动返工）
+        rewrites_used = 0
+        while action == "r":
+            rewrites_used += 1
+            instr = prompt_multiline("请输入本章重写指令单（用于 writer_agent；输入 . 结束）：", end_token=".")
+            # 记录人审（request_rewrite）
+            write_json(
+                os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+                {
+                    "chapter": idx,
+                    "decision": "request_rewrite",
+                    "required_fix": [x.strip() for x in instr.splitlines() if x.strip()],
+                    "notes": instr,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            # 保存当前版本快照
+            try:
+                rw_dir = os.path.join(chapters_dir_current, f"{chap_id}.rewrites")
+                os.makedirs(rw_dir, exist_ok=True)
+                v = int((final_state or {}).get("writer_version", 1) or 1)
+                write_text(os.path.join(rw_dir, f"v{v}.md"), str((final_state or {}).get("writer_result", "") or ""))
             except Exception:
                 pass
+
+            # 驱动重写
+            st2: StoryState = dict(final_state or {})
+            st2["needs_rewrite"] = True
+            st2["rewrite_instructions"] = instr
+            st2["human_decision"] = "request_rewrite"
+            st2["human_approved"] = False
+            st2 = writer_agent(st2)
+            st2 = editor_agent(st2)
+            final_state = st2
+            # 更新落盘正文与主编报告
+            write_text(os.path.join(chapters_dir_current, f"{chap_id}.md"), (final_state or {}).get("writer_result", ""))
+            editor_report = (final_state or {}).get("editor_report") or {}
+            if isinstance(editor_report, dict) and editor_report:
+                write_json(os.path.join(chapters_dir_current, f"{chap_id}.editor.json"), editor_report)
+            decision = (final_state or {}).get("editor_decision", "")
+            feedback = (final_state or {}).get("editor_feedback", [])
+            if decision == "审核通过":
+                write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "审核通过")
+            else:
+                lines = ["审核不通过", "", *[f"- {x}" for x in feedback]]
+                write_text(os.path.join(chapters_dir_current, f"{chap_id}.editor.md"), "\n".join(lines).strip())
+
+            action = prompt_choice(
+                "重写完成，是否通过？",
+                choices={"a": "Accept", "r": "继续重写", "q": "退出"},
+                default="a",
+            )
+            if action == "q":
+                print("\n已退出：你可以基于 outputs/current 继续。")
+                return
+
+        # action == "a"：总编通过，允许沉淀
+        write_json(
+            os.path.join(chapters_dir_current, f"{chap_id}.human_review.json"),
+            {
+                "chapter": idx,
+                "decision": "accept",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+        if final_state is None:
+            continue
+        final_state["human_decision"] = "accept"
+        final_state["human_approved"] = True
+
+        # === 通过后才生成/落盘 memory 与沉淀建议 ===
+        try:
+            final_state = memory_agent(final_state)
+            final_state = canon_update_agent(final_state)
+            final_state = materials_update_agent(final_state)
+        except Exception:
+            pass
+
+        mem = (final_state or {}).get("chapter_memory") or {}
+        if isinstance(mem, dict) and mem:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.memory.json"), mem)
+            write_json(os.path.join(mem_dirs["chapters_dir"], f"{chap_id}.memory.json"), mem)
+
+        # suggestions（只落盘，后续仍走你已有的 apply-* 交互）
+        canon_update_suggestions = (final_state or {}).get("canon_update_suggestions") or []
+        materials_update_suggestions = (final_state or {}).get("materials_update_suggestions") or []
+        if isinstance(canon_update_suggestions, list) and canon_update_suggestions:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.canon_update_suggestions.json"), {"items": canon_update_suggestions})
+        if isinstance(materials_update_suggestions, list) and materials_update_suggestions:
+            write_json(os.path.join(chapters_dir_current, f"{chap_id}.materials_update_suggestions.json"), {"items": materials_update_suggestions})
+
+        # 重要：每章必看模式下，默认不做无人值守自动应用（保持总编控制）
 
         # === Arc summaries：优先在“Arc 结束”时生成（更贴合卷/副本节奏）；否则每 N 章兜底 ===
         try:
@@ -1705,7 +2226,7 @@ def main():
 
     # debug：基于日志生成节点调用图
     if settings.debug:
-        events = load_events(os.path.join(current_dir, "debug.jsonl"))
+        events = load_events(os.path.join(current_dir, "logs", "events.full.jsonl"))
         mermaid = build_call_graph_mermaid_by_chapter(events)
         write_text(os.path.join(current_dir, "call_graph.md"), "```mermaid\n" + mermaid + "```\n")
 

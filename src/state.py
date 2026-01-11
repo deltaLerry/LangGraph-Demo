@@ -27,6 +27,16 @@ class StoryState(TypedDict, total=False):
     # 重写/重申时用户额外指导意见（只影响本次 rewrite/restate，不自动写入 Canon）
     rewrite_instructions: str
 
+    # === Human-in-the-loop（总编门禁）===
+    # 总编对本章的最终决策：accept / request_rewrite / waive / escalate_proposal
+    human_decision: str
+    # 总编是否通过本章（用于记忆沉淀门禁；优先于 editor_decision）
+    human_approved: bool
+    # 总编审阅备注/指令（原文，便于追溯）
+    human_notes: str
+    # 总编判定的冲突锚点引用（可选：用于追溯与后续自动审计）
+    conflict_anchors: List[str]
+
     # idea-file 点子包原文与解析结果（用于追溯/调试）
     idea_source_text: str
     idea_file_path: str

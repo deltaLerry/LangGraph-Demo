@@ -287,6 +287,10 @@ def materials_prompt_digest(bundle: Dict[str, Any], *, chapter_index: Optional[i
     tone = ensure_tone(b.get("tone"))
     outline = ensure_outline(b.get("outline"))
     pack = ensure_materials_pack(b.get("materials_pack"))
+    # 新增：Execution 层（冻结材料包会提供）。旧 materials_bundle 不含这些字段时保持兼容。
+    glossary = b.get("glossary")
+    constraints = b.get("constraints")
+    open_questions = b.get("open_questions")
 
     chap_outline = pick_outline_for_chapter(b, int(chapter_index)) if chapter_index is not None else {}
 
@@ -301,6 +305,11 @@ def materials_prompt_digest(bundle: Dict[str, Any], *, chapter_index: Optional[i
             "decisions": pack.get("decisions", [])[:8],
             "checklists": pack.get("checklists", {}),
         },
+        # 冻结材料包的执行约束（如果存在则注入；避免长跑时术语漂移/段落规则漂移）
+        "constraints": constraints if isinstance(constraints, dict) else {},
+        "glossary": glossary if isinstance(glossary, dict) else {},
+        # 风控/不确定项：默认只给前几条，避免 prompt 膨胀
+        "open_questions": (open_questions[:6] if isinstance(open_questions, list) else []),
         "world": world,
         "characters": characters,
         "tone": tone,
